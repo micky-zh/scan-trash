@@ -1,0 +1,44 @@
+name: baseline_value_first_pass
+version: "0.1"
+objective: >
+  Remove obvious low-quality, illiquid, or statistically cheap but operationally weak
+  businesses before alphabetical review.
+universe: hk_equities
+exclude_tags:
+  - warrant
+  - etf
+  - leveraged_product
+sort_by:
+  - name
+conditions:
+  - field: price_hkd
+    operator: ">="
+    value: 0.5
+    rationale: Remove penny-stock territory where quoted cheapness is often misleading.
+  - field: market_cap_b_hkd
+    operator: ">="
+    value: 10
+    rationale: Focus on businesses large enough to study and transact.
+  - field: pe_ttm
+    operator: ">"
+    value: 0
+    rationale: Exclude loss-making companies from the first pass.
+  - field: pe_ttm
+    operator: "<="
+    value: 15
+    rationale: Prefer statistically undemanding valuations.
+  - field: pb
+    operator: "<="
+    value: 1.5
+    rationale: Keep balance-sheet valuation in range.
+  - field: roe_pct
+    operator: ">="
+    value: 8
+    rationale: Require a minimum return profile.
+  - field: avg_turnover_m_hkd
+    operator: ">="
+    value: 20
+    rationale: Avoid names with weak liquidity.
+notes:
+  - This is a first-pass rule set, not a buy rule.
+  - Banks, insurers, and cyclicals may need sector-specific overrides.

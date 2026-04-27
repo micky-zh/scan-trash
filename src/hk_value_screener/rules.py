@@ -5,13 +5,23 @@ from pathlib import Path
 import yaml
 from pandas import DataFrame
 
-from hk_value_screener.models import RuleFile, RuleNoteTemplate, ScreeningRuleSet
+from hk_value_screener.models import (
+    BlacklistFile,
+    RuleFile,
+    RuleNoteTemplate,
+    ScreeningRuleSet,
+)
 
 
 def load_rule_file(path: Path) -> RuleFile:
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     rule_set = ScreeningRuleSet.model_validate(raw)
     return RuleFile(path=path, rule_set=rule_set, raw=raw)
+
+
+def load_blacklist_file(path: Path) -> BlacklistFile:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return BlacklistFile.model_validate(raw)
 
 
 def apply_rule_set(frame: DataFrame, rule_set: ScreeningRuleSet) -> DataFrame:
@@ -36,6 +46,14 @@ def apply_rule_set(frame: DataFrame, rule_set: ScreeningRuleSet) -> DataFrame:
         else:
             raise ValueError(f"Unsupported operator: {operator}")
     return filtered
+
+
+def apply_blacklist(frame: DataFrame, blacklist: BlacklistFile, code_column: str = "代码") -> DataFrame:
+    blocked_codes = {entry.code for entry in blacklist.entries if entry.active}
+    if not blocked_codes:
+        return frame.copy()
+    filtered = frame.copy()
+    return filtered[~filtered[code_column].astype(str).isin(blocked_codes)].copy()
 
 
 def render_rule_note_template(note: RuleNoteTemplate) -> str:

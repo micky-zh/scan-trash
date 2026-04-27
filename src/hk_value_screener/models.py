@@ -41,3 +41,45 @@ class RuleFile(BaseModel):
     path: Path
     rule_set: ScreeningRuleSet
     raw: dict[str, Any]
+
+
+class BlacklistEntry(BaseModel):
+    code: str
+    name: str = ""
+    category: str = "manual"
+    active: bool = True
+    added_date: str
+    reason: str
+    note: str = ""
+
+
+class BlacklistFile(BaseModel):
+    version: str
+    updated_at: str
+    entries: list[BlacklistEntry] = Field(default_factory=list)
+
+
+class OutputConfig(BaseModel):
+    save_csv: bool = True
+    raw_csv_path: str = "data/raw/hk_spot_full.csv"
+    screened_csv_path: str = "data/processed/hk_screened.csv"
+
+
+class FetchConfig(BaseModel):
+    enabled: bool = True
+    apply_blacklist: bool = True
+    blacklist_file: str = "rules/blacklists/default.yaml"
+
+
+class BaselineRuleConfig(BaseModel):
+    rule_file: str = "rules/screening/baseline.yaml"
+
+
+class AppConfig(BaseModel):
+    name: str
+    version: str
+    description: str = ""
+    fetch: FetchConfig = Field(default_factory=FetchConfig)
+    baseline: BaselineRuleConfig = Field(default_factory=BaselineRuleConfig)
+    output: OutputConfig = Field(default_factory=OutputConfig)
+    sector_profiles: list[str] = Field(default_factory=list)

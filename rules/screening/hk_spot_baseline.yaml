@@ -1,0 +1,32 @@
+name: hk_spot_baseline_first_pass
+version: "0.1"
+objective: >
+  Remove obvious low-quality, illiquid, or hard-to-study names from the live Hong Kong
+  market snapshot before any alphabetical review or sector-level analysis.
+universe: hk_equities
+exclude_tags:
+  - warrant
+  - structured_product
+sort_by:
+  - 名称
+conditions:
+  - field: 最新价
+    operator: ">="
+    value: 0.5
+    rationale: Remove penny-stock territory where quoted cheapness is often misleading.
+  - field: 成交额
+    operator: ">="
+    value: 500000
+    rationale: Avoid names with very weak daily liquidity in the first pass.
+  - field: 总市值
+    operator: ">="
+    value: 1000000000
+    rationale: Focus on companies above HKD 1 billion market cap for initial review.
+  - field: 市盈率-动态
+    operator: ">"
+    value: 0
+    rationale: Exclude currently loss-making companies from the baseline pass.
+notes:
+  - This is a global trash filter, not a valuation rule.
+  - No static PB threshold is used at this stage because sector context matters.
+  - Banks, insurers, property, and cyclical names need sector-level treatment later.

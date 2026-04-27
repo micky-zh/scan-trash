@@ -1,0 +1,10 @@
+version: "0.1"
+updated_at: "2026-04-27"
+entries:
+  - code: "089988"
+    name: "阿里巴巴-WR"
+    category: "structure"
+    active: true
+    added_date: "2026-04-27"
+    reason: "同主体不同证券类型的重复观察对象，第一版扫描先排除 WR 类证券。"
+    note: "后续可扩展为按证券类别统一排除。"

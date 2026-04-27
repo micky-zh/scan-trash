@@ -1,0 +1,15 @@
+name: default
+version: "0.1"
+description: Default config for Hong Kong value screening research.
+fetch:
+  enabled: true
+  apply_blacklist: true
+  blacklist_file: rules/blacklists/default.yaml
+baseline:
+  rule_file: rules/screening/hk_spot_baseline.yaml
+output:
+  save_csv: true
+  raw_csv_path: data/raw/hk_spot_full.csv
+  screened_csv_path: data/processed/hk_screened.csv
+sector_profiles:
+  - docs/playbooks/sector_screening_framework.md

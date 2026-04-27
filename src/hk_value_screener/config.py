@@ -11,6 +11,8 @@ EXPORTS_DIR = DATA_DIR / "exports"
 RULES_DIR = PROJECT_ROOT / "rules"
 SCREENING_RULES_DIR = RULES_DIR / "screening"
 RULE_NOTES_DIR = RULES_DIR / "notes"
+BLACKLISTS_DIR = RULES_DIR / "blacklists"
+CONFIGS_DIR = PROJECT_ROOT / "configs"
 DOCS_DIR = PROJECT_ROOT / "docs"
 
 
@@ -23,6 +25,8 @@ def ensure_directories() -> list[Path]:
         RULES_DIR,
         SCREENING_RULES_DIR,
         RULE_NOTES_DIR,
+        BLACKLISTS_DIR,
+        CONFIGS_DIR,
         DOCS_DIR / "principles",
         DOCS_DIR / "playbooks",
         DOCS_DIR / "postmortems",
