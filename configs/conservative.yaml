@@ -16,5 +16,6 @@ output:
   raw_csv_path: data/raw/hk_spot_full_conservative.csv
   screened_csv_path: data/processed/hk_screened_conservative.csv
   enriched_screened_csv_path: data/processed/hk_screened_enriched_conservative.csv
+  enriched_cache_csv_path: data/raw/hk_screened_enriched_cache_conservative.csv
   financial_screened_csv_path: data/processed/hk_financial_screened_conservative.csv
 sector_profiles: []

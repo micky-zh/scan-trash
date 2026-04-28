@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import typer
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from hk_value_screener.app_config import load_app_config, resolve_project_path
@@ -18,9 +19,14 @@ from hk_value_screener.config import (
 from hk_value_screener.data_sources import (
     build_financial_screened_export,
     enrich_hk_screened_frame,
+    finalize_enriched_hk_screened_frame,
+    fetch_hk_enriched_metrics,
     get_hk_spot_full,
     load_financial_indicators_csv,
+    load_enriched_metrics_cache,
+    merge_enriched_cache,
     merge_spot_with_financials,
+    save_enriched_metrics_cache,
     save_hk_spot_full_csv,
 )
 from hk_value_screener.models import RuleNoteTemplate
@@ -88,6 +94,7 @@ def show_config(config_file: Path = CONFIGS_DIR / "default.yaml") -> None:
     table.add_row("output.raw_csv_path", config.output.raw_csv_path)
     table.add_row("output.screened_csv_path", config.output.screened_csv_path)
     table.add_row("output.enriched_screened_csv_path", config.output.enriched_screened_csv_path)
+    table.add_row("output.enriched_cache_csv_path", config.output.enriched_cache_csv_path)
     table.add_row("output.financial_screened_csv_path", config.output.financial_screened_csv_path)
     table.add_row("sector_profiles", ", ".join(config.sector_profiles) or "-")
     console.print(table)
@@ -256,7 +263,60 @@ def enrich_hk_screened(
         raise typer.Exit(code=1)
 
     frame = pd.read_csv(screened_csv, dtype={"代码": str})
-    enriched = enrich_hk_screened_frame(frame, limit=limit)
+    frame["代码"] = frame["代码"].astype(str).str.zfill(5)
+    if limit is not None:
+        frame = frame.head(limit).copy()
+
+    cache_path = resolve_project_path(config.output.enriched_cache_csv_path)
+    cache = load_enriched_metrics_cache(cache_path)
+
+    codes = frame["代码"].tolist()
+    cached_records = (
+        cache[cache["代码"].isin(codes)].copy()
+        if not cache.empty and "代码" in cache.columns
+        else pd.DataFrame()
+    )
+    cached_success_codes = set()
+    if not cached_records.empty and "补充数据状态" in cached_records.columns:
+        cached_success_codes = set(
+            cached_records.loc[cached_records["补充数据状态"] == "成功", "代码"].astype(str).tolist()
+        )
+
+    missing_codes = [code for code in codes if code not in cached_success_codes]
+    fetched_records: list[dict[str, object]] = []
+
+    if missing_codes:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task_id = progress.add_task("补充港股增强字段", total=len(missing_codes))
+            for code in missing_codes:
+                record = fetch_hk_enriched_metrics(code, timeout_seconds=20)
+                fetched_records.append(record)
+                updated_cache = merge_enriched_cache(
+                    cache if cache.empty else cache,
+                    pd.DataFrame([record]),
+                )
+                cache = updated_cache
+                save_enriched_metrics_cache(cache, cache_path)
+                progress.advance(task_id)
+
+    fetched_frame = pd.DataFrame(fetched_records)
+    updated_cache = merge_enriched_cache(cache, fetched_frame)
+    save_enriched_metrics_cache(updated_cache, cache_path)
+
+    metrics_frame = (
+        updated_cache[updated_cache["代码"].isin(codes)].copy()
+        if not updated_cache.empty and "代码" in updated_cache.columns
+        else pd.DataFrame()
+    )
+    enriched = frame.merge(metrics_frame, on="代码", how="left")
+    enriched = finalize_enriched_hk_screened_frame(enriched)
 
     output_path = resolve_project_path(config.output.enriched_screened_csv_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -283,6 +343,12 @@ def enrich_hk_screened(
     for _, row in preview.iterrows():
         table.add_row(*[str(row[column]) for column in preview_columns])
     console.print(table)
+    console.print(f"Used cache for {len(cached_success_codes & set(codes))} companies.")
+    console.print(f"Fetched {len(missing_codes)} companies from network.")
+    if fetched_records:
+        failed_count = sum(1 for item in fetched_records if str(item.get("补充数据状态", "")) != "成功")
+        console.print(f"Failed but cached for retry later: {failed_count} companies.")
+    console.print(f"Saved enrichment cache to {cache_path}")
     console.print(f"Saved enriched screened CSV to {output_path}")
 
 

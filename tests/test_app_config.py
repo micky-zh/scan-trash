@@ -9,6 +9,7 @@ def test_load_default_app_config() -> None:
     assert config.fetch.apply_blacklist is True
     assert config.output.raw_csv_path.endswith("hk_spot_full.csv")
     assert config.output.screened_csv_path.endswith("hk_screened.csv")
+    assert config.output.enriched_cache_csv_path.endswith("hk_screened_enriched_cache.csv")
 
 
 def test_resolve_project_path_resolves_relative_path() -> None:

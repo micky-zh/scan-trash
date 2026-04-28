@@ -64,6 +64,7 @@ class OutputConfig(BaseModel):
     raw_csv_path: str = "data/raw/hk_spot_full.csv"
     screened_csv_path: str = "data/processed/hk_screened.csv"
     enriched_screened_csv_path: str = "data/processed/hk_screened_enriched.csv"
+    enriched_cache_csv_path: str = "data/raw/hk_screened_enriched_cache.csv"
     financial_screened_csv_path: str = "data/processed/hk_financial_screened.csv"
 
 

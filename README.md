@@ -105,7 +105,8 @@ uv run hkvs enrich-hk-screened
 1. 读取本地 [hk_screened.csv](/Users/zhengfan.19/work/scan-trash/data/processed/hk_screened.csv)
 2. 逐只调用港股财务指标和分红接口
 3. 补充股息率、每股净资产、每股收益、每股经营现金流、派息率等字段
-4. 导出增强版结果
+4. 把已补过的结果写入本地缓存
+5. 导出增强版结果
 
 生成的文件：
 
@@ -116,6 +117,18 @@ uv run hkvs enrich-hk-screened
 - 它是“增强版快筛候选池”
 - 更接近 Yahoo 财经摘要页的感觉
 - 适合你人工翻阅、排序、继续研究
+
+说明：
+
+- 这条命令现在有进度条
+- 第一次跑会慢一些，因为要逐只抓数据
+- 第二次再跑时，会优先使用本地缓存，明显更快
+- 每处理完一只股票就会写一次缓存，中断后可以尽量续跑
+- 单只股票请求现在有超时控制，避免卡住整轮
+
+缓存文件：
+
+- [hk_screened_enriched_cache.csv](/Users/zhengfan.19/work/scan-trash/data/raw/hk_screened_enriched_cache.csv)
 
 ### 2. 正式财务初筛
 

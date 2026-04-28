@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import signal
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -495,6 +497,28 @@ def _safe_ratio(numerator: float | None, denominator: float | None) -> float | N
     return numerator / denominator
 
 
+class RequestTimeoutError(TimeoutError):
+    """Raised when a single-stock enrichment request exceeds the timeout."""
+
+
+@contextmanager
+def _time_limit(seconds: int):
+    if seconds <= 0:
+        yield
+        return
+
+    def handler(signum, frame):  # pragma: no cover - signal path
+        raise RequestTimeoutError(f"single-stock enrichment timed out after {seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def _fetch_hk_derived_report_metrics(symbol: str) -> dict[str, object]:
     import akshare as ak
 
@@ -529,7 +553,7 @@ def _fetch_hk_derived_report_metrics(symbol: str) -> dict[str, object]:
     }
 
 
-def fetch_hk_enriched_metrics(symbol: str) -> dict[str, object]:
+def fetch_hk_enriched_metrics(symbol: str, timeout_seconds: int = 20) -> dict[str, object]:
     """
     Fetch a richer Hong Kong stock profile using AKShare's Hong Kong-specific endpoints.
     """
@@ -537,23 +561,35 @@ def fetch_hk_enriched_metrics(symbol: str) -> dict[str, object]:
     result: dict[str, object] = {"代码": normalized_symbol, "补充数据状态": "成功"}
 
     try:
-        result.update(_fetch_hk_financial_indicator_snapshot(normalized_symbol))
-        result.update(_fetch_hk_analysis_indicator_snapshot(normalized_symbol))
-        result.update(_fetch_hk_dividend_snapshot(normalized_symbol))
-        result.update(_fetch_hk_company_profile_snapshot(normalized_symbol))
-        result.update(_fetch_hk_security_profile_snapshot(normalized_symbol))
-        result.update(_fetch_hk_derived_report_metrics(normalized_symbol))
+        with _time_limit(timeout_seconds):
+            result.update(_fetch_hk_financial_indicator_snapshot(normalized_symbol))
+            result.update(_fetch_hk_analysis_indicator_snapshot(normalized_symbol))
+            result.update(_fetch_hk_dividend_snapshot(normalized_symbol))
+            result.update(_fetch_hk_company_profile_snapshot(normalized_symbol))
+            result.update(_fetch_hk_security_profile_snapshot(normalized_symbol))
+            result.update(_fetch_hk_derived_report_metrics(normalized_symbol))
 
-        operating_cash_flow = pd.to_numeric(result.get("经营业务现金净额"), errors="coerce")
-        net_profit = pd.to_numeric(result.get("净利润"), errors="coerce")
-        result["净现比"] = _safe_ratio(
-            None if pd.isna(operating_cash_flow) else float(operating_cash_flow),
-            None if pd.isna(net_profit) else float(net_profit),
-        )
+            operating_cash_flow = pd.to_numeric(result.get("经营业务现金净额"), errors="coerce")
+            net_profit = pd.to_numeric(result.get("净利润"), errors="coerce")
+            result["净现比"] = _safe_ratio(
+                None if pd.isna(operating_cash_flow) else float(operating_cash_flow),
+                None if pd.isna(net_profit) else float(net_profit),
+            )
     except Exception as exc:  # pragma: no cover - network failure path
         result["补充数据状态"] = f"失败: {str(exc)[:120]}"
 
     return result
+
+
+def finalize_enriched_hk_screened_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """
+    Reorder and clean an already-enriched Hong Kong screened frame for export.
+    """
+    merged = frame.copy()
+    selected_columns = [column for column in ENRICHED_DISPLAY_COLUMNS if column in merged.columns]
+    cleaned = merged[selected_columns].copy()
+    cleaned["代码"] = cleaned["代码"].astype(str).str.zfill(5)
+    return cleaned
 
 
 def enrich_hk_screened_frame(frame: pd.DataFrame, limit: int | None = None) -> pd.DataFrame:
@@ -568,8 +604,48 @@ def enrich_hk_screened_frame(frame: pd.DataFrame, limit: int | None = None) -> p
     records = [fetch_hk_enriched_metrics(code) for code in working["代码"].tolist()]
     enriched_metrics = pd.DataFrame(records)
     merged = working.merge(enriched_metrics, on="代码", how="left")
+    return finalize_enriched_hk_screened_frame(merged)
 
-    selected_columns = [column for column in ENRICHED_DISPLAY_COLUMNS if column in merged.columns]
-    cleaned = merged[selected_columns].copy()
-    cleaned["代码"] = cleaned["代码"].astype(str).str.zfill(5)
-    return cleaned
+
+def load_enriched_metrics_cache(path: Path) -> pd.DataFrame:
+    """
+    Load local enrichment cache if present.
+    """
+    if not path.exists():
+        return pd.DataFrame()
+
+    cache = pd.read_csv(path, dtype={"代码": str})
+    if "代码" in cache.columns:
+        cache["代码"] = cache["代码"].astype(str).str.zfill(5)
+    return cache
+
+
+def save_enriched_metrics_cache(frame: pd.DataFrame, path: Path) -> Path:
+    """
+    Save local enrichment cache.
+    """
+    output = frame.copy()
+    if "代码" in output.columns:
+        output["代码"] = output["代码"].astype(str).str.zfill(5)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    output.to_csv(path, index=False)
+    return path
+
+
+def merge_enriched_cache(existing: pd.DataFrame, new_records: pd.DataFrame) -> pd.DataFrame:
+    """
+    Merge newly fetched enrichment records into cache, preferring the latest rows by code.
+    """
+    if existing.empty:
+        merged = new_records.copy()
+    elif new_records.empty:
+        merged = existing.copy()
+    else:
+        merged = pd.concat([existing, new_records], ignore_index=True, sort=False)
+
+    if "代码" not in merged.columns:
+        return merged
+
+    merged["代码"] = merged["代码"].astype(str).str.zfill(5)
+    merged = merged.drop_duplicates(subset=["代码"], keep="last").reset_index(drop=True)
+    return merged
