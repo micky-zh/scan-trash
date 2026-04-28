@@ -1,8 +1,9 @@
 name: hk_spot_baseline_first_pass
-version: "0.1"
+version: "0.2"
 objective: >
   Remove obvious low-quality, illiquid, or hard-to-study names from the live Hong Kong
-  market snapshot before any alphabetical review or sector-level analysis.
+  market snapshot before any alphabetical review. This rule is a trash filter, not the
+  full value-investing baseline.
 universe: hk_equities
 exclude_tags:
   - warrant
@@ -16,17 +17,18 @@ conditions:
     rationale: Remove penny-stock territory where quoted cheapness is often misleading.
   - field: 成交额
     operator: ">="
-    value: 500000
+    value: 1000000
     rationale: Avoid names with very weak daily liquidity in the first pass.
   - field: 总市值
     operator: ">="
-    value: 1000000000
-    rationale: Focus on companies above HKD 1 billion market cap for initial review.
+    value: 5000000000
+    rationale: Focus on companies large enough for an initial quality-oriented pass.
   - field: 市盈率-动态
     operator: ">"
     value: 0
     rationale: Exclude currently loss-making companies from the baseline pass.
 notes:
-  - This is a global trash filter, not a valuation rule.
+  - This is the live-market trash filter only, not the full financial baseline.
   - No static PB threshold is used at this stage because sector context matters.
-  - Banks, insurers, property, and cyclical names need sector-level treatment later.
+  - Banks, insurers, property, and cyclical names still need sector-level treatment later.
+  - Full first-pass quality rules live in rules/screening/baseline.yaml and docs/principles.md.

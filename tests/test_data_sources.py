@@ -28,10 +28,10 @@ def test_normalize_hk_spot_full_keeps_value_fields() -> None:
                 "3.46",
                 "1234567890",
                 "1000000000",
+                "0.2",
                 "0.95",
                 "4.5",
                 "6.8",
-                "0.2",
                 None,
                 None,
                 None,
@@ -49,5 +49,8 @@ def test_normalize_hk_spot_full_keeps_value_fields() -> None:
     assert normalized.loc[0, "代码"] == "00005"
     assert normalized.loc[0, "市盈率-动态"] == 7.9
     assert normalized.loc[0, "市净率"] == 0.95
+    assert normalized.loc[0, "涨速"] == 0.2
+    assert normalized.loc[0, "60日涨跌幅"] == 4.5
+    assert normalized.loc[0, "年初至今涨跌幅"] == 6.8
     assert normalized.loc[0, "总市值"] == 1234567890
     assert normalized.loc[0, "换手率"] == 0.8

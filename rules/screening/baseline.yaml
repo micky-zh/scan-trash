@@ -1,13 +1,18 @@
 name: baseline_value_first_pass
-version: "0.1"
+version: "0.2"
 objective: >
-  Remove obvious low-quality, illiquid, or statistically cheap but operationally weak
-  businesses before alphabetical review.
+  Build a high-signal Hong Kong value-investing watchlist by removing companies with
+  weak earnings quality, weak cash conversion, excessive leverage, or fragile business
+  quality before alphabetical review and sector deep dives.
 universe: hk_equities
 exclude_tags:
   - warrant
   - etf
   - leveraged_product
+  - bank
+  - insurer
+  - broker
+  - property_developer
 sort_by:
   - name
 conditions:
@@ -17,28 +22,50 @@ conditions:
     rationale: Remove penny-stock territory where quoted cheapness is often misleading.
   - field: market_cap_b_hkd
     operator: ">="
-    value: 10
-    rationale: Focus on businesses large enough to study and transact.
+    value: 5
+    rationale: Focus on companies large enough for initial research and portfolio entry.
   - field: pe_ttm
     operator: ">"
     value: 0
-    rationale: Exclude loss-making companies from the first pass.
+    rationale: Exclude currently loss-making companies from the first pass.
   - field: pe_ttm
     operator: "<="
-    value: 15
-    rationale: Prefer statistically undemanding valuations.
-  - field: pb
-    operator: "<="
-    value: 1.5
-    rationale: Keep balance-sheet valuation in range.
+    value: 20
+    rationale: Keep valuation from becoming the whole thesis in the first pass.
   - field: roe_pct
     operator: ">="
-    value: 8
-    rationale: Require a minimum return profile.
+    value: 12
+    rationale: Require a decent long-run return profile before deeper work.
+  - field: net_income_positive_years_5y
+    operator: ">="
+    value: 4
+    rationale: Prefer businesses with stable profitability over a full cycle.
+  - field: operating_cashflow_positive_years_5y
+    operator: ">="
+    value: 4
+    rationale: Profit should usually be backed by operating cash generation.
+  - field: ocf_to_net_income_avg_5y
+    operator: ">="
+    value: 0.9
+    rationale: Weak cash conversion is a common value trap signal.
+  - field: fcf_positive_years_5y
+    operator: ">="
+    value: 3
+    rationale: The business should produce owner-distributable cash in most years.
+  - field: net_debt_to_ebitda
+    operator: "<="
+    value: 2
+    rationale: Keep leverage inside a range that can survive a downturn.
+  - field: interest_coverage
+    operator: ">="
+    value: 5
+    rationale: Require room to service debt without heroic assumptions.
   - field: avg_turnover_m_hkd
     operator: ">="
-    value: 20
+    value: 10
     rationale: Avoid names with weak liquidity.
 notes:
   - This is a first-pass rule set, not a buy rule.
-  - Banks, insurers, and cyclicals may need sector-specific overrides.
+  - Full review still needs moat, management integrity, and capital allocation judgment.
+  - Static PB is intentionally removed from the baseline because sector context matters.
+  - Banks, insurers, brokers, property, and strong cyclicals need sector-specific rules.

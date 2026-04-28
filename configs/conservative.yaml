@@ -7,9 +7,14 @@ fetch:
   blacklist_file: rules/blacklists/default.yaml
 baseline:
   rule_file: rules/screening/hk_spot_baseline.yaml
+financial:
+  financial_csv_path: data/raw/hk_financial_indicators.csv
+  code_column: 代码
+  rule_file: rules/screening/baseline.yaml
 output:
   save_csv: true
   raw_csv_path: data/raw/hk_spot_full_conservative.csv
   screened_csv_path: data/processed/hk_screened_conservative.csv
-sector_profiles:
-  - docs/playbooks/sector_screening_framework.md
+  enriched_screened_csv_path: data/processed/hk_screened_enriched_conservative.csv
+  financial_screened_csv_path: data/processed/hk_financial_screened_conservative.csv
+sector_profiles: []

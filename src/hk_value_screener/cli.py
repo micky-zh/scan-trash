@@ -15,7 +15,14 @@ from hk_value_screener.config import (
     SCREENING_RULES_DIR,
     ensure_directories,
 )
-from hk_value_screener.data_sources import get_hk_spot_full, save_hk_spot_full_csv
+from hk_value_screener.data_sources import (
+    build_financial_screened_export,
+    enrich_hk_screened_frame,
+    get_hk_spot_full,
+    load_financial_indicators_csv,
+    merge_spot_with_financials,
+    save_hk_spot_full_csv,
+)
 from hk_value_screener.models import RuleNoteTemplate
 from hk_value_screener.rules import (
     apply_blacklist,
@@ -74,9 +81,14 @@ def show_config(config_file: Path = CONFIGS_DIR / "default.yaml") -> None:
     table.add_row("fetch.apply_blacklist", str(config.fetch.apply_blacklist))
     table.add_row("fetch.blacklist_file", config.fetch.blacklist_file)
     table.add_row("baseline.rule_file", config.baseline.rule_file)
+    table.add_row("financial.financial_csv_path", config.financial.financial_csv_path)
+    table.add_row("financial.code_column", config.financial.code_column)
+    table.add_row("financial.rule_file", config.financial.rule_file)
     table.add_row("output.save_csv", str(config.output.save_csv))
     table.add_row("output.raw_csv_path", config.output.raw_csv_path)
     table.add_row("output.screened_csv_path", config.output.screened_csv_path)
+    table.add_row("output.enriched_screened_csv_path", config.output.enriched_screened_csv_path)
+    table.add_row("output.financial_screened_csv_path", config.output.financial_screened_csv_path)
     table.add_row("sector_profiles", ", ".join(config.sector_profiles) or "-")
     console.print(table)
 
@@ -188,7 +200,7 @@ def screen_hk_spot(
         console.print("Run `uv run hkvs fetch-hk-spot-full` first.")
         raise typer.Exit(code=1)
 
-    frame = pd.read_csv(source_csv)
+    frame = pd.read_csv(source_csv, dtype={"代码": str})
     initial_count = len(frame)
 
     blacklist_excluded = 0
@@ -211,7 +223,7 @@ def screen_hk_spot(
         title=f"Screened Hong Kong spot: {len(screened)} companies "
         f"(from {initial_count}, blacklist excluded {blacklist_excluded})"
     )
-    for column in ["代码", "名称", "最新价", "成交额", "市盈率-动态", "总市值"]:
+    for column in ["代码", "名称", "最新价", "成交额", "市盈率-动态", "市净率", "总市值"]:
         table.add_column(column)
 
     preview = screened.head(15)
@@ -222,10 +234,125 @@ def screen_hk_spot(
             str(row["最新价"]),
             str(row["成交额"]),
             str(row["市盈率-动态"]),
+            str(row["市净率"]),
             str(row["总市值"]),
         )
     console.print(table)
     console.print(f"Saved screened CSV to {output_path}")
+
+
+@app.command("enrich-hk-screened")
+def enrich_hk_screened(
+    config_file: Path = CONFIGS_DIR / "default.yaml",
+    limit: int | None = None,
+) -> None:
+    """Enrich the screened Hong Kong stock list with broader financial and dividend fields."""
+    ensure_directories()
+    config = load_app_config(config_file)
+    screened_csv = resolve_project_path(config.output.screened_csv_path)
+    if not screened_csv.exists():
+        console.print(f"Missing screened CSV: {screened_csv}")
+        console.print("Run `uv run hkvs screen-hk-spot` first.")
+        raise typer.Exit(code=1)
+
+    frame = pd.read_csv(screened_csv, dtype={"代码": str})
+    enriched = enrich_hk_screened_frame(frame, limit=limit)
+
+    output_path = resolve_project_path(config.output.enriched_screened_csv_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    enriched.to_csv(output_path, index=False)
+
+    table = Table(title=f"Enriched Hong Kong screened list: {len(enriched)} companies")
+    preview_columns: list[str] = []
+    for column in [
+        "代码",
+        "名称",
+        "最新价",
+        "市盈率-动态",
+        "市净率",
+        "股息率TTM(%)",
+        "每股净资产(元)",
+        "基本每股收益(元)",
+        "补充数据状态",
+    ]:
+        if column in enriched.columns:
+            table.add_column(column)
+            preview_columns.append(column)
+
+    preview = enriched.head(15)
+    for _, row in preview.iterrows():
+        table.add_row(*[str(row[column]) for column in preview_columns])
+    console.print(table)
+    console.print(f"Saved enriched screened CSV to {output_path}")
+
+
+@app.command("screen-financial-baseline")
+def screen_financial_baseline(
+    config_file: Path = CONFIGS_DIR / "default.yaml",
+) -> None:
+    """Merge spot data with local financial indicators and run the full baseline rule set."""
+    ensure_directories()
+    config = load_app_config(config_file)
+
+    spot_csv = resolve_project_path(config.output.raw_csv_path)
+    if not spot_csv.exists():
+        console.print(f"Missing spot CSV: {spot_csv}")
+        console.print("Run `uv run hkvs fetch-hk-spot-full` first.")
+        raise typer.Exit(code=1)
+
+    financial_csv = resolve_project_path(config.financial.financial_csv_path)
+    if not financial_csv.exists():
+        console.print(f"Missing financial CSV: {financial_csv}")
+        console.print("Use the sample template at `data/raw/hk_financial_indicators_sample.csv`.")
+        raise typer.Exit(code=1)
+
+    spot_frame = pd.read_csv(spot_csv, dtype={"代码": str})
+    if config.fetch.apply_blacklist:
+        blacklist_file = resolve_project_path(config.fetch.blacklist_file)
+        blacklist = load_blacklist_file(blacklist_file)
+        spot_frame = apply_blacklist(spot_frame, blacklist)
+
+    financial_frame = load_financial_indicators_csv(
+        financial_csv, code_column=config.financial.code_column
+    )
+    merged = merge_spot_with_financials(spot_frame, financial_frame)
+
+    rule_file = resolve_project_path(config.financial.rule_file)
+    rule = load_rule_file(rule_file)
+    screened = apply_rule_set(merged, rule.rule_set)
+    export_frame = build_financial_screened_export(screened)
+
+    output_path = resolve_project_path(config.output.financial_screened_csv_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    export_frame.to_csv(output_path, index=False)
+
+    table = Table(title=f"Financial baseline screen: {len(export_frame)} companies")
+    for column in [
+        "代码",
+        "名称",
+        "最新价",
+        "市盈率-动态",
+        "市净率",
+        "股东权益回报率(%)",
+        "过去5年经营现金流/净利润",
+        "净负债/EBITDA",
+    ]:
+        table.add_column(column)
+
+    preview = export_frame.head(15)
+    for _, row in preview.iterrows():
+        table.add_row(
+            str(row["代码"]),
+            str(row["名称"]),
+            str(row["最新价"]),
+            str(row["市盈率-动态"]),
+            str(row["市净率"]),
+            str(row["股东权益回报率(%)"]),
+            str(row["过去5年经营现金流/净利润"]),
+            str(row["净负债/EBITDA"]),
+        )
+    console.print(table)
+    console.print(f"Saved financial screened CSV to {output_path}")
 
 
 @app.command("show-blacklist")

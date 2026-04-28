@@ -63,6 +63,8 @@ class OutputConfig(BaseModel):
     save_csv: bool = True
     raw_csv_path: str = "data/raw/hk_spot_full.csv"
     screened_csv_path: str = "data/processed/hk_screened.csv"
+    enriched_screened_csv_path: str = "data/processed/hk_screened_enriched.csv"
+    financial_screened_csv_path: str = "data/processed/hk_financial_screened.csv"
 
 
 class FetchConfig(BaseModel):
@@ -75,11 +77,18 @@ class BaselineRuleConfig(BaseModel):
     rule_file: str = "rules/screening/baseline.yaml"
 
 
+class FinancialDataConfig(BaseModel):
+    financial_csv_path: str = "data/raw/hk_financial_indicators.csv"
+    code_column: str = "代码"
+    rule_file: str = "rules/screening/baseline.yaml"
+
+
 class AppConfig(BaseModel):
     name: str
     version: str
     description: str = ""
     fetch: FetchConfig = Field(default_factory=FetchConfig)
     baseline: BaselineRuleConfig = Field(default_factory=BaselineRuleConfig)
+    financial: FinancialDataConfig = Field(default_factory=FinancialDataConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     sector_profiles: list[str] = Field(default_factory=list)
