@@ -218,6 +218,39 @@ uv run vr filings --market cn --download
 - `financials --missing-only` 用于结构化财报缓存续跑，只补缺失的财报文件。
 - `filings --download` 会跳过已经存在的文件，只下载缺失文件。
 
+## 个股深度分析
+
+当你已经从研究表里筛出候选股，建议这样补齐分析材料：
+
+```bash
+uv run vr financials --market hk --symbol 00700
+uv run vr hk --symbol 00700
+uv run vr filings --market hk --symbol 00700 --download
+```
+
+说明：
+
+- 先跑 `financials`，把结构化历史财报补齐，长期指标会更完整。
+- 再跑 `hk/us/cn --symbol`，看最终研究表里的可比字段。
+- 最后按需看 `filings`，用原始公告和主文档核对管理层表述、风险事项和一次性因素。
+- 这三步不是硬依赖，但组合起来最适合做个股深度分析。
+
+## 黑名单
+
+如果某家公司已经判断为能力圈外，或者业务、口径、风险特征暂时不想继续跟踪，可以手工加入黑名单。
+
+```bash
+uv run vr blacklist add --market hk --symbol 00700 --reason "业务太复杂" --name "腾讯控股"
+uv run vr blacklist list
+uv run vr blacklist remove --market hk --symbol 00700
+```
+
+说明：
+
+- 黑名单保存在本地 `data/state/blacklist.csv`。
+- 默认只打标，不过滤，研究 CSV 会自动增加 `黑名单` 和 `黑名单原因` 两列。
+- `remove` 只是停用，不会删除历史记录，后续还可以重新启用。
+
 ## 常见问题
 
 为什么 `financials` 全量任务很慢？
@@ -557,6 +590,17 @@ uv run vr filings --market cn --refresh --download
 - `--refresh` 会重新抓取并覆盖同一公告链接的最新版本。
 
 ## 字段
+
+打开研究 CSV 时，可以先看这几类列：
+
+- `代码`、`名称`：股票身份。
+- `最新价`、`总市值`、`市盈率`、`市净率`、`市销率`、`市现率`、`PEG`：估值快筛。
+- `营业收入`、`净利润`、`经营现金流净额`、`自由现金流`：业务和现金创造能力。
+- `毛利率(%)`、`销售净利率(%)`、`净资产收益率(%)`：盈利质量。
+- `流动比率`、`速动比率`、`资产负债率(%)`、`有息负债率(%)`：偿债和安全边际。
+- `过去3年/5年 ... CAGR(%)`、`过去5年 ... 为正年数`：长期趋势和稳定性。
+- `补充数据状态`：这只股票的增强字段是否抓取成功。
+- `黑名单`、`黑名单原因`：是否被你手工标记为能力圈外，以及原因。
 
 港股研究表重点字段：
 

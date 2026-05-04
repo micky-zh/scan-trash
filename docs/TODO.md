@@ -27,6 +27,7 @@
 - [x] 支持三个市场一起缓存：`uv run vr financials --market all`。
 - [x] 支持财报缓存并发：`uv run vr financials --market cn --workers 3`。
 - [x] 支持财报缓存断点式补跑：`uv run vr financials --market cn --missing-only`。
+- [x] 支持本地黑名单 `add/list/remove`，研究表默认只打标不过滤。
 - [x] 修复美股非普通公司证券导致的财报缓存报错。
 - [x] 修复美股财报接口 `NoneType` 报错。
 - [x] 修复 A 股财报缓存参数传递错误。
@@ -58,7 +59,7 @@
 
 ## 下一步计划：文档和使用体验
 
-- [ ] 增加示例输出字段说明，减少打开 CSV 后的理解成本。
+- [x] 增加示例输出字段说明，减少打开 CSV 后的理解成本。
 - [ ] 继续清理历史 README 中不准确或重复的命令说明。
 
 ## 暂不做

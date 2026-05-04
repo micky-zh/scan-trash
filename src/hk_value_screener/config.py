@@ -5,6 +5,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
+STATE_DIR = DATA_DIR / "state"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
 CONFIGS_DIR = PROJECT_ROOT / "configs"
 
@@ -13,6 +14,7 @@ def ensure_directories() -> list[Path]:
     directories = [
         DATA_DIR,
         RAW_DATA_DIR,
+        STATE_DIR,
         PROCESSED_DATA_DIR,
         CONFIGS_DIR,
     ]

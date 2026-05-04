@@ -237,6 +237,8 @@ HK_RESEARCH_VIEW_COLUMNS = [
     "最新财政年度",
     "最新分红方案",
     "补充数据状态",
+    "黑名单",
+    "黑名单原因",
 ]
 
 US_RESEARCH_VIEW_COLUMNS = [
@@ -289,6 +291,8 @@ US_RESEARCH_VIEW_COLUMNS = [
     "报告日期",
     "币种",
     "补充数据状态",
+    "黑名单",
+    "黑名单原因",
 ]
 
 CN_RESEARCH_VIEW_COLUMNS = [
@@ -345,6 +349,8 @@ CN_RESEARCH_VIEW_COLUMNS = [
     "报告期",
     "财务指标日期",
     "补充数据状态",
+    "黑名单",
+    "黑名单原因",
 ]
 
 MARKET_CODE_PAD_WIDTH = {
@@ -713,6 +719,7 @@ def _ratio_from_annual_maps(
 def build_hk_research_view(
     base_frame: pd.DataFrame,
     enriched_metrics_frame: pd.DataFrame,
+    blacklist_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Build an Excel-friendly Hong Kong value research view from a quote universe.
@@ -740,6 +747,7 @@ def build_hk_research_view(
         net_profit_growth_column="净利润同比增长率(%)",
         operating_cash_flow_column="经营现金流净额",
     )
+    merged = _apply_blacklist_annotations(merged, market="hk", blacklist_frame=blacklist_frame)
     selected_columns = [column for column in HK_RESEARCH_VIEW_COLUMNS if column in merged.columns]
     return merged[selected_columns].copy()
 
@@ -747,6 +755,7 @@ def build_hk_research_view(
 def build_us_research_view(
     base_frame: pd.DataFrame,
     enriched_metrics_frame: pd.DataFrame,
+    blacklist_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Build an Excel-friendly US value research view from a quote universe.
@@ -774,6 +783,7 @@ def build_us_research_view(
         net_profit_growth_column="净利润同比增长率(%)",
         operating_cash_flow_column="经营现金流净额",
     )
+    merged = _apply_blacklist_annotations(merged, market="us", blacklist_frame=blacklist_frame)
     selected_columns = [column for column in US_RESEARCH_VIEW_COLUMNS if column in merged.columns]
     return merged[selected_columns].copy()
 
@@ -781,6 +791,7 @@ def build_us_research_view(
 def build_cn_research_view(
     base_frame: pd.DataFrame,
     enriched_metrics_frame: pd.DataFrame,
+    blacklist_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Build an Excel-friendly China A-share value research view from a quote universe.
@@ -808,6 +819,7 @@ def build_cn_research_view(
         net_profit_growth_column="净利润同比增长率(%)",
         operating_cash_flow_column="经营现金流净额",
     )
+    merged = _apply_blacklist_annotations(merged, market="cn", blacklist_frame=blacklist_frame)
     selected_columns = [column for column in CN_RESEARCH_VIEW_COLUMNS if column in merged.columns]
     return merged[selected_columns].copy()
 
@@ -840,6 +852,47 @@ def _add_common_valuation_metrics(
             lambda row: _safe_divide(row.get(pe_column), row.get(net_profit_growth_column)),
             axis=1,
         )
+
+
+def _apply_blacklist_annotations(
+    frame: pd.DataFrame,
+    market: str,
+    blacklist_frame: pd.DataFrame | None,
+) -> pd.DataFrame:
+    output = frame.copy()
+    output["黑名单"] = ""
+    output["黑名单原因"] = ""
+
+    if blacklist_frame is None or blacklist_frame.empty or "代码" not in output.columns:
+        return output
+
+    blacklist = blacklist_frame.copy()
+    if "market" in blacklist.columns:
+        blacklist = blacklist[blacklist["market"].astype(str).str.lower() == market]
+    if blacklist.empty or "code" not in blacklist.columns:
+        return output
+
+    if "enabled" in blacklist.columns:
+        blacklist = blacklist[blacklist["enabled"].fillna(False).astype(bool)]
+    if blacklist.empty:
+        return output
+
+    blacklist["code"] = normalize_security_codes(blacklist["code"], market=market)
+    if "reason" not in blacklist.columns:
+        blacklist["reason"] = ""
+    reason_map = (
+        blacklist.dropna(subset=["code"])
+        .drop_duplicates(subset=["code"], keep="last")
+        .set_index("code")["reason"]
+        .fillna("")
+    )
+    if reason_map.empty:
+        return output
+
+    masked = output["代码"].isin(reason_map.index)
+    output.loc[masked, "黑名单"] = "是"
+    output.loc[masked, "黑名单原因"] = output.loc[masked, "代码"].map(reason_map).fillna("")
+    return output
 
 
 def _fetch_hk_financial_indicator_snapshot(symbol: str) -> dict[str, object]:

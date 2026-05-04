@@ -187,8 +187,18 @@ def test_build_hk_research_view_merges_enriched_fields() -> None:
             }
         ]
     )
+    blacklist = pd.DataFrame(
+        [
+            {
+                "market": "hk",
+                "code": "00700",
+                "reason": "业务太复杂",
+                "enabled": True,
+            }
+        ]
+    )
 
-    research_view = build_hk_research_view(spot, enriched)
+    research_view = build_hk_research_view(spot, enriched, blacklist_frame=blacklist)
 
     assert research_view.loc[0, "代码"] == "00700"
     assert research_view.loc[0, "所属行业"] == "互联网服务"
@@ -196,6 +206,8 @@ def test_build_hk_research_view_merges_enriched_fields() -> None:
     assert research_view.loc[0, "市销率"] == 6.0
     assert research_view.loc[0, "市现率"] == 24.0
     assert research_view.loc[0, "PEG"] == 0.9
+    assert research_view.loc[0, "黑名单"] == "是"
+    assert research_view.loc[0, "黑名单原因"] == "业务太复杂"
     assert list(research_view.columns[:10]) == [
         "代码",
         "名称",
@@ -405,6 +417,16 @@ def test_build_us_research_view_merges_financial_ratio_fields() -> None:
             }
         ]
     )
+    blacklist = pd.DataFrame(
+        [
+            {
+                "market": "us",
+                "code": "AAPL",
+                "reason": "不懂业务",
+                "enabled": True,
+            }
+        ]
+    )
     enriched = pd.DataFrame(
         [
             {
@@ -423,7 +445,7 @@ def test_build_us_research_view_merges_financial_ratio_fields() -> None:
         ]
     )
 
-    research_view = build_us_research_view(spot, enriched)
+    research_view = build_us_research_view(spot, enriched, blacklist_frame=blacklist)
 
     assert research_view.loc[0, "代码"] == "AAPL"
     assert research_view.loc[0, "毛利率(%)"] == 46.9
@@ -431,6 +453,8 @@ def test_build_us_research_view_merges_financial_ratio_fields() -> None:
     assert research_view.loc[0, "市销率"] == 7.25
     assert research_view.loc[0, "市现率"] == 29.0
     assert research_view.loc[0, "PEG"] == 2.95
+    assert research_view.loc[0, "黑名单"] == "是"
+    assert research_view.loc[0, "黑名单原因"] == "不懂业务"
     assert list(research_view.columns[:7]) == [
         "代码",
         "名称",
@@ -458,6 +482,16 @@ def test_build_cn_research_view_merges_financial_ratio_fields() -> None:
             }
         ]
     )
+    blacklist = pd.DataFrame(
+        [
+            {
+                "market": "cn",
+                "code": "000001",
+                "reason": "数据口径不清楚",
+                "enabled": True,
+            }
+        ]
+    )
     enriched = pd.DataFrame(
         [
             {
@@ -476,7 +510,7 @@ def test_build_cn_research_view_merges_financial_ratio_fields() -> None:
         ]
     )
 
-    research_view = build_cn_research_view(spot, enriched)
+    research_view = build_cn_research_view(spot, enriched, blacklist_frame=blacklist)
 
     assert research_view.loc[0, "代码"] == "000001"
     assert research_view.loc[0, "销售毛利率(%)"] == 50.0
@@ -484,6 +518,8 @@ def test_build_cn_research_view_merges_financial_ratio_fields() -> None:
     assert research_view.loc[0, "市销率"] == 2.0
     assert research_view.loc[0, "市现率"] == 8.0
     assert round(research_view.loc[0, "PEG"], 2) == -1.18
+    assert research_view.loc[0, "黑名单"] == "是"
+    assert research_view.loc[0, "黑名单原因"] == "数据口径不清楚"
     assert list(research_view.columns[:9]) == [
         "代码",
         "名称",

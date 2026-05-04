@@ -11,6 +11,12 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from rich.table import Table
 
 from hk_value_screener.app_config import load_app_config, resolve_project_path
+from hk_value_screener.blacklist import (
+    disable_blacklist_entry,
+    list_blacklist_entries,
+    load_active_blacklist,
+    upsert_blacklist_entry,
+)
 from hk_value_screener.config import (
     CONFIGS_DIR,
     ensure_directories,
@@ -39,12 +45,15 @@ from hk_value_screener.data_sources import (
     load_enriched_metrics_cache,
     merge_enriched_cache,
     normalize_security_codes,
+    normalize_security_code,
     normalize_us_filing_ticker,
     save_enriched_metrics_cache,
     save_spot_full_csv,
 )
 
 app = typer.Typer(help="Value research export toolkit.")
+blacklist_app = typer.Typer(help="Manage local research blacklists.")
+app.add_typer(blacklist_app, name="blacklist")
 console = Console()
 
 MARKET_LABELS = {"hk": "Hong Kong", "us": "United States", "cn": "China A-share"}
@@ -113,6 +122,10 @@ def _financial_history_missing_statements(market: str, code: str, root_dir: Path
         for statement in financial_history_statements(market)
         if not financial_history_cache_path(market, code, statement, root_dir).exists()
     ]
+
+
+def _load_market_blacklist(market: str) -> pd.DataFrame:
+    return load_active_blacklist(market=market)
 
 
 def _filings_us_candidates(frame: pd.DataFrame) -> pd.DataFrame:
@@ -317,6 +330,7 @@ def _build_hk_research_view(
 ) -> Path:
     config = load_app_config(config_file)
     base_frame = _load_hk_research_base(config_file, symbol=symbol)
+    blacklist_frame = _load_market_blacklist("hk")
 
     cache_path = resolve_project_path(config.output.enriched_cache_csv_path)
     cache = load_enriched_metrics_cache(cache_path, market="hk")
@@ -329,7 +343,11 @@ def _build_hk_research_view(
         if not cache.empty and "代码" in cache.columns
         else pd.DataFrame()
     )
-    initial_research_view = build_hk_research_view(base_frame, cached_metrics_frame)
+    initial_research_view = build_hk_research_view(
+        base_frame,
+        cached_metrics_frame,
+        blacklist_frame=blacklist_frame,
+    )
     initial_research_view.to_csv(output_path, index=False)
     console.print(f"Saved initial full research view CSV to {output_path}")
 
@@ -345,7 +363,11 @@ def _build_hk_research_view(
         if not updated_cache.empty and "代码" in updated_cache.columns
         else pd.DataFrame()
     )
-    research_view = build_hk_research_view(base_frame, metrics_frame)
+    research_view = build_hk_research_view(
+        base_frame,
+        metrics_frame,
+        blacklist_frame=blacklist_frame,
+    )
 
     research_view.to_csv(output_path, index=False)
 
@@ -395,6 +417,7 @@ def _build_us_research_view(
 ) -> Path:
     config = load_app_config(config_file)
     base_frame = _load_us_research_base(config_file, symbol=symbol)
+    blacklist_frame = _load_market_blacklist("us")
 
     cache_path = resolve_project_path(config.output.enriched_cache_csv_path)
     cache = load_enriched_metrics_cache(cache_path, market="us")
@@ -407,7 +430,11 @@ def _build_us_research_view(
         if not cache.empty and "代码" in cache.columns
         else pd.DataFrame()
     )
-    initial_research_view = build_us_research_view(base_frame, cached_metrics_frame)
+    initial_research_view = build_us_research_view(
+        base_frame,
+        cached_metrics_frame,
+        blacklist_frame=blacklist_frame,
+    )
     initial_research_view.to_csv(output_path, index=False)
     console.print(f"Saved initial full research view CSV to {output_path}")
 
@@ -423,7 +450,11 @@ def _build_us_research_view(
         if not updated_cache.empty and "代码" in updated_cache.columns
         else pd.DataFrame()
     )
-    research_view = build_us_research_view(base_frame, metrics_frame)
+    research_view = build_us_research_view(
+        base_frame,
+        metrics_frame,
+        blacklist_frame=blacklist_frame,
+    )
 
     research_view.to_csv(output_path, index=False)
 
@@ -473,6 +504,7 @@ def _build_cn_research_view(
 ) -> Path:
     config = load_app_config(config_file)
     base_frame = _load_cn_research_base(config_file, symbol=symbol)
+    blacklist_frame = _load_market_blacklist("cn")
 
     cache_path = resolve_project_path(config.output.enriched_cache_csv_path)
     cache = load_enriched_metrics_cache(cache_path, market="cn")
@@ -485,7 +517,11 @@ def _build_cn_research_view(
         if not cache.empty and "代码" in cache.columns
         else pd.DataFrame()
     )
-    initial_research_view = build_cn_research_view(base_frame, cached_metrics_frame)
+    initial_research_view = build_cn_research_view(
+        base_frame,
+        cached_metrics_frame,
+        blacklist_frame=blacklist_frame,
+    )
     initial_research_view.to_csv(output_path, index=False)
     console.print(f"Saved initial full research view CSV to {output_path}")
 
@@ -501,7 +537,11 @@ def _build_cn_research_view(
         if not updated_cache.empty and "代码" in updated_cache.columns
         else pd.DataFrame()
     )
-    research_view = build_cn_research_view(base_frame, metrics_frame)
+    research_view = build_cn_research_view(
+        base_frame,
+        metrics_frame,
+        blacklist_frame=blacklist_frame,
+    )
 
     research_view.to_csv(output_path, index=False)
 
@@ -972,3 +1012,90 @@ def cn(
         refresh_enrich=refresh_enrich or refresh_all,
         symbol=symbol,
     )
+
+
+@blacklist_app.command("add")
+def blacklist_add(
+    market: str = typer.Option(..., "--market", help="Market code: hk, us, or cn."),
+    symbol: str = typer.Option(..., "--symbol", help="Stock code to blacklist."),
+    reason: str = typer.Option(..., "--reason", help="Why this company is blacklisted."),
+    name: str = typer.Option("", "--name", help="Optional company name."),
+) -> None:
+    """Add or re-enable a local blacklist entry."""
+    ensure_directories()
+    try:
+        entry = upsert_blacklist_entry(
+            market=market,
+            code=symbol,
+            reason=reason,
+            name=name,
+        )
+    except ValueError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    normalized_market = market.strip().lower()
+    normalized_code = normalize_security_code(symbol, market=normalized_market)
+    row = entry[
+        (entry["market"] == normalized_market) & (entry["code"] == normalized_code)
+    ].iloc[0]
+    console.print(
+        f"Saved blacklist entry: {row['market'].upper()} {row['code']} "
+        f"({row['name'] or '-'})"
+    )
+
+
+@blacklist_app.command("remove")
+def blacklist_remove(
+    market: str = typer.Option(..., "--market", help="Market code: hk, us, or cn."),
+    symbol: str = typer.Option(..., "--symbol", help="Stock code to remove."),
+) -> None:
+    """Disable a local blacklist entry without deleting history."""
+    ensure_directories()
+    try:
+        removed = disable_blacklist_entry(market=market, code=symbol)
+    except ValueError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    if not removed:
+        console.print("Blacklist entry not found.")
+        raise typer.Exit(code=1)
+
+    normalized_market = market.strip().lower()
+    normalized_code = normalize_security_code(symbol, market=normalized_market)
+    console.print(f"Disabled blacklist entry: {normalized_market.upper()} {normalized_code}")
+
+
+@blacklist_app.command("list")
+def blacklist_list(
+    market: str | None = typer.Option(None, "--market", help="Optional market filter."),
+) -> None:
+    """Show local blacklist entries."""
+    ensure_directories()
+    try:
+        entries = list_blacklist_entries(market=market)
+    except ValueError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    if entries.empty:
+        console.print("No blacklist entries.")
+        return
+
+    table = Table(title="Local blacklist")
+    for column in ["market", "code", "name", "reason", "enabled", "created_at", "updated_at"]:
+        table.add_column(column)
+
+    for _, row in entries.iterrows():
+        table.add_row(
+            str(row.get("market", "")),
+            str(row.get("code", "")),
+            str(row.get("name", "")),
+            str(row.get("reason", "")),
+            "yes" if bool(row.get("enabled", False)) else "no",
+            str(row.get("created_at", "")),
+            str(row.get("updated_at", "")),
+        )
+
+    console.print(table)
