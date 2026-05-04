@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -11,36 +11,42 @@ from rich.table import Table
 
 from hk_value_screener.app_config import load_app_config, resolve_project_path
 from hk_value_screener.config import (
-    BLACKLISTS_DIR,
     CONFIGS_DIR,
-    SCREENING_RULES_DIR,
     ensure_directories,
 )
 from hk_value_screener.data_sources import (
-    build_financial_screened_export,
-    enrich_hk_screened_frame,
-    finalize_enriched_hk_screened_frame,
+    build_cn_research_view,
+    build_hk_research_view,
+    build_us_research_view,
+    cache_cn_financial_history,
+    cache_hk_financial_history,
+    cache_us_financial_history,
+    fetch_cn_enriched_metrics,
     fetch_hk_enriched_metrics,
+    fetch_us_enriched_metrics,
+    get_cn_spot_full,
     get_hk_spot_full,
-    load_financial_indicators_csv,
+    get_us_spot_full,
     load_enriched_metrics_cache,
     merge_enriched_cache,
-    merge_spot_with_financials,
+    normalize_security_codes,
     save_enriched_metrics_cache,
-    save_hk_spot_full_csv,
+    save_spot_full_csv,
 )
-from hk_value_screener.models import RuleNoteTemplate
-from hk_value_screener.rules import (
-    apply_blacklist,
-    apply_rule_set,
-    load_blacklist_file,
-    load_rule_file,
-    render_rule_note_template,
-)
-from hk_value_screener.sample_data import sample_universe
 
-app = typer.Typer(help="Hong Kong value screening research toolkit.")
+app = typer.Typer(help="Value research export toolkit.")
 console = Console()
+
+MARKET_LABELS = {"hk": "Hong Kong", "us": "United States", "cn": "China A-share"}
+MARKET_PE_COLUMNS = {"hk": "市盈率-动态", "us": "市盈率", "cn": "市盈率-动态"}
+
+
+def _market_label(market: str) -> str:
+    return MARKET_LABELS.get(market, market.upper())
+
+
+def _preview_columns_for_market(market: str) -> list[str]:
+    return ["代码", "名称", "最新价", "成交额", MARKET_PE_COLUMNS[market], "市净率", "总市值"]
 
 
 @app.command("bootstrap")
@@ -48,29 +54,6 @@ def bootstrap() -> None:
     """Create local project directories."""
     directories = ensure_directories()
     console.print(f"Initialized {len(directories)} directories.")
-
-
-@app.command("show-rules")
-def show_rules(rule_file: Path = SCREENING_RULES_DIR / "baseline.yaml") -> None:
-    """Display a screening rule set."""
-    ensure_directories()
-    rule = load_rule_file(rule_file)
-
-    table = Table(title=f"{rule.rule_set.name} ({rule.rule_set.version})")
-    table.add_column("Field")
-    table.add_column("Operator")
-    table.add_column("Value")
-    table.add_column("Rationale")
-
-    for condition in rule.rule_set.conditions:
-        table.add_row(
-            condition.field,
-            condition.operator,
-            str(condition.value),
-            condition.rationale,
-        )
-
-    console.print(table)
 
 
 @app.command("show-config")
@@ -83,206 +66,139 @@ def show_config(config_file: Path = CONFIGS_DIR / "default.yaml") -> None:
     table.add_column("Section")
     table.add_column("Value")
     table.add_row("description", config.description)
+    table.add_row("market", config.market)
     table.add_row("fetch.enabled", str(config.fetch.enabled))
-    table.add_row("fetch.apply_blacklist", str(config.fetch.apply_blacklist))
-    table.add_row("fetch.blacklist_file", config.fetch.blacklist_file)
-    table.add_row("baseline.rule_file", config.baseline.rule_file)
-    table.add_row("financial.financial_csv_path", config.financial.financial_csv_path)
-    table.add_row("financial.code_column", config.financial.code_column)
-    table.add_row("financial.rule_file", config.financial.rule_file)
     table.add_row("output.save_csv", str(config.output.save_csv))
     table.add_row("output.raw_csv_path", config.output.raw_csv_path)
-    table.add_row("output.screened_csv_path", config.output.screened_csv_path)
-    table.add_row("output.enriched_screened_csv_path", config.output.enriched_screened_csv_path)
     table.add_row("output.enriched_cache_csv_path", config.output.enriched_cache_csv_path)
-    table.add_row("output.financial_screened_csv_path", config.output.financial_screened_csv_path)
+    table.add_row("output.research_csv_path", config.output.research_csv_path)
     table.add_row("sector_profiles", ", ".join(config.sector_profiles) or "-")
     console.print(table)
 
 
-@app.command("run-sample-screen")
-def run_sample_screen(rule_file: Path = SCREENING_RULES_DIR / "baseline.yaml") -> None:
-    """Apply rules to bundled sample data."""
-    ensure_directories()
-    rule = load_rule_file(rule_file)
-    frame = sample_universe()
-    filtered = apply_rule_set(frame, rule.rule_set)
-
-    table = Table(title=f"Sample screen result: {len(filtered)} companies")
-    for column in ["code", "name", "price_hkd", "pe_ttm", "pb", "roe_pct", "dividend_yield_pct"]:
-        table.add_column(column)
-
-    for _, row in filtered.iterrows():
-        table.add_row(
-            str(row["code"]),
-            str(row["name"]),
-            str(row["price_hkd"]),
-            str(row["pe_ttm"]),
-            str(row["pb"]),
-            str(row["roe_pct"]),
-            str(row["dividend_yield_pct"]),
-        )
-    console.print(table)
+def _fetch_spot_full_by_market(market: str) -> pd.DataFrame:
+    if market == "hk":
+        return get_hk_spot_full()
+    if market == "us":
+        return get_us_spot_full()
+    if market == "cn":
+        return get_cn_spot_full()
+    raise ValueError(f"Unsupported market: {market}")
 
 
-@app.command("scaffold-rules-note")
-def scaffold_rules_note(
-    name: str = "new-observation",
-    output_dir: Path = Path("rules/notes"),
-) -> None:
-    """Create a note template for rule iteration."""
-    ensure_directories()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    note = RuleNoteTemplate(
-        title="Rule iteration note",
-        date=str(date.today()),
-        tags=["screening", "postmortem"],
-        hypothesis="What did I expect this rule to capture or eliminate?",
-        lesson="What actually happened?",
-        action="How should the rule or checklist change?",
-        evidence=["Add tickers, dates, and concise evidence here."],
-    )
-    path = output_dir / f"{name}.md"
-    path.write_text(render_rule_note_template(note), encoding="utf-8")
-    console.print(f"Created {path}")
-
-
-@app.command("fetch-hk-spot-full")
-def fetch_hk_spot_full(
-    config_file: Path = CONFIGS_DIR / "default.yaml",
-) -> None:
-    """Fetch full Hong Kong spot data with value-screening fields preserved."""
+def _fetch_spot_full(config_file: Path) -> None:
     ensure_directories()
     config = load_app_config(config_file)
     if not config.fetch.enabled:
         console.print("Fetch is disabled in config.")
         raise typer.Exit(code=1)
 
-    frame = get_hk_spot_full()
-    filtered = frame
-    excluded_count = 0
-    if config.fetch.apply_blacklist:
-        blacklist_file = resolve_project_path(config.fetch.blacklist_file)
-        blacklist = load_blacklist_file(blacklist_file)
-        filtered = apply_blacklist(frame, blacklist)
-        excluded_count = len(frame) - len(filtered)
+    frame = _fetch_spot_full_by_market(config.market)
 
-    table = Table(
-        title=f"Hong Kong spot full fields: {len(filtered)} companies "
-        f"(excluded {excluded_count} blacklisted names)"
-    )
-    for column in ["代码", "名称", "最新价", "换手率", "市盈率-动态", "市净率", "总市值"]:
-        table.add_column(column)
+    preview_columns = _preview_columns_for_market(config.market)
+    table = Table(title=f"{_market_label(config.market)} spot full fields: {len(frame)} companies")
+    for column in preview_columns:
+        if column in frame.columns:
+            table.add_column(column)
 
-    preview = filtered.head(10)
-    for _, row in preview.iterrows():
-        table.add_row(
-            str(row["代码"]),
-            str(row["名称"]),
-            str(row["最新价"]),
-            str(row["换手率"]),
-            str(row["市盈率-动态"]),
-            str(row["市净率"]),
-            str(row["总市值"]),
-        )
+    for _, row in frame.head(10).iterrows():
+        values = [str(row[column]) for column in preview_columns if column in frame.columns]
+        table.add_row(*values)
     console.print(table)
 
     if config.output.save_csv:
-        output_path = save_hk_spot_full_csv(
-            filtered, path=resolve_project_path(config.output.raw_csv_path)
+        output_path = save_spot_full_csv(
+            frame,
+            path=resolve_project_path(config.output.raw_csv_path),
+            market=config.market,
         )
         console.print(f"Saved CSV to {output_path}")
 
 
-@app.command("screen-hk-spot")
-def screen_hk_spot(
-    config_file: Path = CONFIGS_DIR / "default.yaml",
-) -> None:
-    """Apply baseline rules to saved Hong Kong spot CSV and export a screened CSV."""
-    ensure_directories()
+def _load_hk_research_base(config_file: Path) -> pd.DataFrame:
     config = load_app_config(config_file)
     source_csv = resolve_project_path(config.output.raw_csv_path)
     if not source_csv.exists():
-        console.print(f"Missing source CSV: {source_csv}")
-        console.print("Run `uv run hkvs fetch-hk-spot-full` first.")
+        console.print(f"Missing research source CSV: {source_csv}")
+        console.print("Run `uv run vr hk` first.")
         raise typer.Exit(code=1)
 
     frame = pd.read_csv(source_csv, dtype={"代码": str})
-    initial_count = len(frame)
+    frame["代码"] = normalize_security_codes(frame["代码"], market="hk")
+    return frame
 
-    blacklist_excluded = 0
-    if config.fetch.apply_blacklist:
-        blacklist_file = resolve_project_path(config.fetch.blacklist_file)
-        blacklist = load_blacklist_file(blacklist_file)
-        blacklisted = apply_blacklist(frame, blacklist)
-        blacklist_excluded = len(frame) - len(blacklisted)
-        frame = blacklisted
 
-    rule_file = resolve_project_path(config.baseline.rule_file)
-    rule = load_rule_file(rule_file)
-    screened = apply_rule_set(frame, rule.rule_set)
-
-    output_path = resolve_project_path(config.output.screened_csv_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    screened.to_csv(output_path, index=False)
-
-    table = Table(
-        title=f"Screened Hong Kong spot: {len(screened)} companies "
-        f"(from {initial_count}, blacklist excluded {blacklist_excluded})"
+def _fetch_hk_enriched_metrics_for_codes(
+    codes: list[str],
+    cache: pd.DataFrame,
+    cache_path: Path,
+    refresh_enrich: bool = False,
+) -> tuple[pd.DataFrame, int, int]:
+    return _fetch_enriched_metrics_for_codes(
+        codes=codes,
+        cache=cache,
+        cache_path=cache_path,
+        market="hk",
+        task_description="补充港股研究字段",
+        fetcher=fetch_hk_enriched_metrics,
+        refresh_enrich=refresh_enrich,
     )
-    for column in ["代码", "名称", "最新价", "成交额", "市盈率-动态", "市净率", "总市值"]:
-        table.add_column(column)
-
-    preview = screened.head(15)
-    for _, row in preview.iterrows():
-        table.add_row(
-            str(row["代码"]),
-            str(row["名称"]),
-            str(row["最新价"]),
-            str(row["成交额"]),
-            str(row["市盈率-动态"]),
-            str(row["市净率"]),
-            str(row["总市值"]),
-        )
-    console.print(table)
-    console.print(f"Saved screened CSV to {output_path}")
 
 
-@app.command("enrich-hk-screened")
-def enrich_hk_screened(
-    config_file: Path = CONFIGS_DIR / "default.yaml",
-    limit: int | None = None,
-) -> None:
-    """Enrich the screened Hong Kong stock list with broader financial and dividend fields."""
-    ensure_directories()
-    config = load_app_config(config_file)
-    screened_csv = resolve_project_path(config.output.screened_csv_path)
-    if not screened_csv.exists():
-        console.print(f"Missing screened CSV: {screened_csv}")
-        console.print("Run `uv run hkvs screen-hk-spot` first.")
-        raise typer.Exit(code=1)
-
-    frame = pd.read_csv(screened_csv, dtype={"代码": str})
-    frame["代码"] = frame["代码"].astype(str).str.zfill(5)
-    if limit is not None:
-        frame = frame.head(limit).copy()
-
-    cache_path = resolve_project_path(config.output.enriched_cache_csv_path)
-    cache = load_enriched_metrics_cache(cache_path)
-
-    codes = frame["代码"].tolist()
-    cached_records = (
-        cache[cache["代码"].isin(codes)].copy()
-        if not cache.empty and "代码" in cache.columns
-        else pd.DataFrame()
+def _fetch_us_enriched_metrics_for_codes(
+    codes: list[str],
+    cache: pd.DataFrame,
+    cache_path: Path,
+    refresh_enrich: bool = False,
+) -> tuple[pd.DataFrame, int, int]:
+    return _fetch_enriched_metrics_for_codes(
+        codes=codes,
+        cache=cache,
+        cache_path=cache_path,
+        market="us",
+        task_description="补充美股研究字段",
+        fetcher=fetch_us_enriched_metrics,
+        refresh_enrich=refresh_enrich,
     )
-    cached_success_codes = set()
-    if not cached_records.empty and "补充数据状态" in cached_records.columns:
+
+
+def _fetch_cn_enriched_metrics_for_codes(
+    codes: list[str],
+    cache: pd.DataFrame,
+    cache_path: Path,
+    refresh_enrich: bool = False,
+) -> tuple[pd.DataFrame, int, int]:
+    return _fetch_enriched_metrics_for_codes(
+        codes=codes,
+        cache=cache,
+        cache_path=cache_path,
+        market="cn",
+        task_description="补充A股研究字段",
+        fetcher=fetch_cn_enriched_metrics,
+        refresh_enrich=refresh_enrich,
+    )
+
+
+def _fetch_enriched_metrics_for_codes(
+    codes: list[str],
+    cache: pd.DataFrame,
+    cache_path: Path,
+    market: str,
+    task_description: str,
+    fetcher,
+    refresh_enrich: bool = False,
+) -> tuple[pd.DataFrame, int, int]:
+    cached_success_codes: set[str] = set()
+    if not cache.empty and "代码" in cache.columns and "补充数据状态" in cache.columns:
         cached_success_codes = set(
-            cached_records.loc[cached_records["补充数据状态"] == "成功", "代码"].astype(str).tolist()
+            cache.loc[cache["补充数据状态"] == "成功", "代码"].astype(str).tolist()
         )
 
-    missing_codes = [code for code in codes if code not in cached_success_codes]
+    missing_codes = (
+        codes
+        if refresh_enrich
+        else [code for code in codes if code not in cached_success_codes]
+    )
     fetched_records: list[dict[str, object]] = []
 
     if missing_codes:
@@ -294,156 +210,371 @@ def enrich_hk_screened(
             TimeElapsedColumn(),
             console=console,
         ) as progress:
-            task_id = progress.add_task("补充港股增强字段", total=len(missing_codes))
+            task_id = progress.add_task(task_description, total=len(missing_codes))
             for code in missing_codes:
-                record = fetch_hk_enriched_metrics(code, timeout_seconds=20)
+                record = fetcher(code, timeout_seconds=20)
                 fetched_records.append(record)
-                updated_cache = merge_enriched_cache(
-                    cache if cache.empty else cache,
-                    pd.DataFrame([record]),
-                )
-                cache = updated_cache
-                save_enriched_metrics_cache(cache, cache_path)
+                cache = merge_enriched_cache(cache, pd.DataFrame([record]), market=market)
+                save_enriched_metrics_cache(cache, cache_path, market=market)
                 progress.advance(task_id)
 
     fetched_frame = pd.DataFrame(fetched_records)
-    updated_cache = merge_enriched_cache(cache, fetched_frame)
-    save_enriched_metrics_cache(updated_cache, cache_path)
+    updated_cache = merge_enriched_cache(cache, fetched_frame, market=market)
+    save_enriched_metrics_cache(updated_cache, cache_path, market=market)
+
+    return updated_cache, len(cached_success_codes & set(codes)), len(missing_codes)
+
+
+def _build_hk_research_view(config_file: Path, refresh_enrich: bool) -> Path:
+    config = load_app_config(config_file)
+    base_frame = _load_hk_research_base(config_file)
+
+    cache_path = resolve_project_path(config.output.enriched_cache_csv_path)
+    cache = load_enriched_metrics_cache(cache_path, market="hk")
+    codes = base_frame["代码"].tolist()
+
+    output_path = resolve_project_path(config.output.research_csv_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cached_metrics_frame = (
+        cache[cache["代码"].isin(codes)].copy()
+        if not cache.empty and "代码" in cache.columns
+        else pd.DataFrame()
+    )
+    initial_research_view = build_hk_research_view(base_frame, cached_metrics_frame)
+    initial_research_view.to_csv(output_path, index=False)
+    console.print(f"Saved initial full research view CSV to {output_path}")
+
+    updated_cache, cached_count, fetched_count = _fetch_hk_enriched_metrics_for_codes(
+        codes,
+        cache,
+        cache_path,
+        refresh_enrich=refresh_enrich,
+    )
 
     metrics_frame = (
         updated_cache[updated_cache["代码"].isin(codes)].copy()
         if not updated_cache.empty and "代码" in updated_cache.columns
         else pd.DataFrame()
     )
-    enriched = frame.merge(metrics_frame, on="代码", how="left")
-    enriched = finalize_enriched_hk_screened_frame(enriched)
+    research_view = build_hk_research_view(base_frame, metrics_frame)
 
-    output_path = resolve_project_path(config.output.enriched_screened_csv_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    enriched.to_csv(output_path, index=False)
+    research_view.to_csv(output_path, index=False)
 
-    table = Table(title=f"Enriched Hong Kong screened list: {len(enriched)} companies")
-    preview_columns: list[str] = []
-    for column in [
+    table = Table(title=f"Hong Kong research view: {len(research_view)} companies")
+    preview_columns = [
         "代码",
         "名称",
-        "最新价",
+        "所属行业",
         "市盈率-动态",
         "市净率",
-        "股息率TTM(%)",
-        "每股净资产(元)",
-        "基本每股收益(元)",
-        "补充数据状态",
-    ]:
-        if column in enriched.columns:
+        "净现比",
+        "流动比率",
+        "速动比率",
+        "毛利率(%)",
+        "销售净利率(%)",
+    ]
+    for column in preview_columns:
+        if column in research_view.columns:
             table.add_column(column)
-            preview_columns.append(column)
-
-    preview = enriched.head(15)
-    for _, row in preview.iterrows():
-        table.add_row(*[str(row[column]) for column in preview_columns])
+    for _, row in research_view.head(15).iterrows():
+        values = [str(row[column]) for column in preview_columns if column in research_view.columns]
+        table.add_row(*values)
     console.print(table)
-    console.print(f"Used cache for {len(cached_success_codes & set(codes))} companies.")
-    console.print(f"Fetched {len(missing_codes)} companies from network.")
-    if fetched_records:
-        failed_count = sum(1 for item in fetched_records if str(item.get("补充数据状态", "")) != "成功")
-        console.print(f"Failed but cached for retry later: {failed_count} companies.")
-    console.print(f"Saved enrichment cache to {cache_path}")
-    console.print(f"Saved enriched screened CSV to {output_path}")
+    console.print(f"Used cache for {cached_count} companies.")
+    console.print(f"Fetched {fetched_count} companies from network.")
+    console.print(f"Saved research view CSV to {output_path}")
+    return output_path
 
 
-@app.command("screen-financial-baseline")
-def screen_financial_baseline(
-    config_file: Path = CONFIGS_DIR / "default.yaml",
-) -> None:
-    """Merge spot data with local financial indicators and run the full baseline rule set."""
-    ensure_directories()
+def _load_us_research_base(config_file: Path) -> pd.DataFrame:
     config = load_app_config(config_file)
-
-    spot_csv = resolve_project_path(config.output.raw_csv_path)
-    if not spot_csv.exists():
-        console.print(f"Missing spot CSV: {spot_csv}")
-        console.print("Run `uv run hkvs fetch-hk-spot-full` first.")
+    source_csv = resolve_project_path(config.output.raw_csv_path)
+    if not source_csv.exists():
+        console.print(f"Missing research source CSV: {source_csv}")
+        console.print("Run `uv run vr us` first.")
         raise typer.Exit(code=1)
 
-    financial_csv = resolve_project_path(config.financial.financial_csv_path)
-    if not financial_csv.exists():
-        console.print(f"Missing financial CSV: {financial_csv}")
-        console.print("Use the sample template at `data/raw/hk_financial_indicators_sample.csv`.")
-        raise typer.Exit(code=1)
+    frame = pd.read_csv(source_csv, dtype={"代码": str})
+    frame["代码"] = normalize_security_codes(frame["代码"], market="us")
+    return frame
 
-    spot_frame = pd.read_csv(spot_csv, dtype={"代码": str})
-    if config.fetch.apply_blacklist:
-        blacklist_file = resolve_project_path(config.fetch.blacklist_file)
-        blacklist = load_blacklist_file(blacklist_file)
-        spot_frame = apply_blacklist(spot_frame, blacklist)
 
-    financial_frame = load_financial_indicators_csv(
-        financial_csv, code_column=config.financial.code_column
-    )
-    merged = merge_spot_with_financials(spot_frame, financial_frame)
+def _build_us_research_view(config_file: Path, refresh_enrich: bool) -> Path:
+    config = load_app_config(config_file)
+    base_frame = _load_us_research_base(config_file)
 
-    rule_file = resolve_project_path(config.financial.rule_file)
-    rule = load_rule_file(rule_file)
-    screened = apply_rule_set(merged, rule.rule_set)
-    export_frame = build_financial_screened_export(screened)
+    cache_path = resolve_project_path(config.output.enriched_cache_csv_path)
+    cache = load_enriched_metrics_cache(cache_path, market="us")
+    codes = base_frame["代码"].tolist()
 
-    output_path = resolve_project_path(config.output.financial_screened_csv_path)
+    output_path = resolve_project_path(config.output.research_csv_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    export_frame.to_csv(output_path, index=False)
+    cached_metrics_frame = (
+        cache[cache["代码"].isin(codes)].copy()
+        if not cache.empty and "代码" in cache.columns
+        else pd.DataFrame()
+    )
+    initial_research_view = build_us_research_view(base_frame, cached_metrics_frame)
+    initial_research_view.to_csv(output_path, index=False)
+    console.print(f"Saved initial full research view CSV to {output_path}")
 
-    table = Table(title=f"Financial baseline screen: {len(export_frame)} companies")
-    for column in [
+    updated_cache, cached_count, fetched_count = _fetch_us_enriched_metrics_for_codes(
+        codes,
+        cache,
+        cache_path,
+        refresh_enrich=refresh_enrich,
+    )
+
+    metrics_frame = (
+        updated_cache[updated_cache["代码"].isin(codes)].copy()
+        if not updated_cache.empty and "代码" in updated_cache.columns
+        else pd.DataFrame()
+    )
+    research_view = build_us_research_view(base_frame, metrics_frame)
+
+    research_view.to_csv(output_path, index=False)
+
+    table = Table(title=f"United States research view: {len(research_view)} companies")
+    preview_columns = [
         "代码",
         "名称",
-        "最新价",
+        "市盈率",
+        "毛利率(%)",
+        "销售净利率(%)",
+        "净资产收益率(平均)(%)",
+        "流动比率",
+        "速动比率",
+        "资产负债率(%)",
+        "补充数据状态",
+    ]
+    for column in preview_columns:
+        if column in research_view.columns:
+            table.add_column(column)
+    for _, row in research_view.head(15).iterrows():
+        values = [str(row[column]) for column in preview_columns if column in research_view.columns]
+        table.add_row(*values)
+    console.print(table)
+    console.print(f"Used cache for {cached_count} companies.")
+    console.print(f"Fetched {fetched_count} companies from network.")
+    console.print(f"Saved research view CSV to {output_path}")
+    return output_path
+
+
+def _load_cn_research_base(config_file: Path) -> pd.DataFrame:
+    config = load_app_config(config_file)
+    source_csv = resolve_project_path(config.output.raw_csv_path)
+    if not source_csv.exists():
+        console.print(f"Missing research source CSV: {source_csv}")
+        console.print("Run `uv run vr cn` first.")
+        raise typer.Exit(code=1)
+
+    frame = pd.read_csv(source_csv, dtype={"代码": str})
+    frame["代码"] = normalize_security_codes(frame["代码"], market="cn")
+    return frame
+
+
+def _build_cn_research_view(config_file: Path, refresh_enrich: bool) -> Path:
+    config = load_app_config(config_file)
+    base_frame = _load_cn_research_base(config_file)
+
+    cache_path = resolve_project_path(config.output.enriched_cache_csv_path)
+    cache = load_enriched_metrics_cache(cache_path, market="cn")
+    codes = base_frame["代码"].tolist()
+
+    output_path = resolve_project_path(config.output.research_csv_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cached_metrics_frame = (
+        cache[cache["代码"].isin(codes)].copy()
+        if not cache.empty and "代码" in cache.columns
+        else pd.DataFrame()
+    )
+    initial_research_view = build_cn_research_view(base_frame, cached_metrics_frame)
+    initial_research_view.to_csv(output_path, index=False)
+    console.print(f"Saved initial full research view CSV to {output_path}")
+
+    updated_cache, cached_count, fetched_count = _fetch_cn_enriched_metrics_for_codes(
+        codes,
+        cache,
+        cache_path,
+        refresh_enrich=refresh_enrich,
+    )
+
+    metrics_frame = (
+        updated_cache[updated_cache["代码"].isin(codes)].copy()
+        if not updated_cache.empty and "代码" in updated_cache.columns
+        else pd.DataFrame()
+    )
+    research_view = build_cn_research_view(base_frame, metrics_frame)
+
+    research_view.to_csv(output_path, index=False)
+
+    table = Table(title=f"China A-share research view: {len(research_view)} companies")
+    preview_columns = [
+        "代码",
+        "名称",
         "市盈率-动态",
         "市净率",
-        "股东权益回报率(%)",
-        "过去5年经营现金流/净利润",
-        "净负债/EBITDA",
-    ]:
-        table.add_column(column)
-
-    preview = export_frame.head(15)
-    for _, row in preview.iterrows():
-        table.add_row(
-            str(row["代码"]),
-            str(row["名称"]),
-            str(row["最新价"]),
-            str(row["市盈率-动态"]),
-            str(row["市净率"]),
-            str(row["股东权益回报率(%)"]),
-            str(row["过去5年经营现金流/净利润"]),
-            str(row["净负债/EBITDA"]),
-        )
+        "销售毛利率(%)",
+        "销售净利率(%)",
+        "净资产收益率(%)",
+        "流动比率",
+        "速动比率",
+        "补充数据状态",
+    ]
+    for column in preview_columns:
+        if column in research_view.columns:
+            table.add_column(column)
+    for _, row in research_view.head(15).iterrows():
+        values = [str(row[column]) for column in preview_columns if column in research_view.columns]
+        table.add_row(*values)
     console.print(table)
-    console.print(f"Saved financial screened CSV to {output_path}")
+    console.print(f"Used cache for {cached_count} companies.")
+    console.print(f"Fetched {fetched_count} companies from network.")
+    console.print(f"Saved research view CSV to {output_path}")
+    return output_path
 
 
-@app.command("show-blacklist")
-def show_blacklist(
-    blacklist_file: Path = BLACKLISTS_DIR / "default.yaml",
+@app.command("financials")
+def financials(
+    market: str = "cn",
+    config_file: Path | None = None,
+    limit: int | None = None,
+    refresh: bool = False,
+    sleep_seconds: float = 1.5,
+    batch_size: int = 10,
+    batch_sleep_seconds: float = 5.0,
 ) -> None:
-    """Display current active blacklist entries."""
+    """Cache raw financial histories locally."""
+    if market not in {"hk", "us", "cn"}:
+        console.print("`financials` supports only `hk`, `us`, or `cn`.")
+        raise typer.Exit(code=1)
+
     ensure_directories()
-    blacklist = load_blacklist_file(blacklist_file)
-    table = Table(title=f"Blacklist: {blacklist_file.name}")
-    table.add_column("Code")
-    table.add_column("Name")
-    table.add_column("Category")
-    table.add_column("Added")
-    table.add_column("Active")
-    table.add_column("Reason")
+    if config_file is None:
+        config_file = {
+            "hk": CONFIGS_DIR / "default.yaml",
+            "us": CONFIGS_DIR / "us.yaml",
+            "cn": CONFIGS_DIR / "cn.yaml",
+        }[market]
+    config = load_app_config(config_file)
+    if config.market != market:
+        console.print(f"`financials --market {market}` requires a {market} config.")
+        raise typer.Exit(code=1)
 
-    for entry in blacklist.entries:
-        table.add_row(
-            entry.code,
-            entry.name,
-            entry.category,
-            entry.added_date,
-            "yes" if entry.active else "no",
-            entry.reason,
-        )
+    source_csv = resolve_project_path(config.output.raw_csv_path)
+    if not source_csv.exists():
+        console.print(f"Missing {_market_label(market)} spot CSV: {source_csv}")
+        console.print(f"Fetching {_market_label(market)} spot data first.")
+        _fetch_spot_full(config_file)
 
-    console.print(table)
+    frame = pd.read_csv(source_csv, dtype={"代码": str})
+    frame["代码"] = normalize_security_codes(frame["代码"], market=market)
+    codes = sorted(frame["代码"].dropna().drop_duplicates().tolist())
+    if limit is not None:
+        codes = codes[:limit]
+
+    root_dir = resolve_project_path(f"data/raw/financials/{market}")
+    cache_fetcher = {
+        "hk": cache_hk_financial_history,
+        "us": cache_us_financial_history,
+        "cn": cache_cn_financial_history,
+    }[market]
+    added_rows_by_statement: dict[str, int] = {}
+    failed_count = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task(f"缓存{_market_label(market)}历史财报", total=len(codes))
+        for index, code in enumerate(codes, start=1):
+            result = cache_fetcher(code, root_dir=root_dir, refresh=refresh)
+            for statement, added_rows in result.added_rows_by_statement.items():
+                added_rows_by_statement[statement] = (
+                    added_rows_by_statement.get(statement, 0) + added_rows
+                )
+            if result.status != "成功":
+                failed_count += 1
+                console.print(f"{result.code}: {result.status}")
+
+            progress.advance(task_id)
+            if index < len(codes) and sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+            if batch_size > 0 and index % batch_size == 0 and index < len(codes):
+                time.sleep(batch_sleep_seconds)
+
+    console.print(f"Cached financial histories for {len(codes)} {_market_label(market)} companies.")
+    for statement, added_rows in sorted(added_rows_by_statement.items()):
+        console.print(f"Added {statement} rows: {added_rows}.")
+    console.print(f"Failed companies: {failed_count}.")
+    console.print(f"Saved under {root_dir}")
+
+
+@app.command("hk")
+def hk(
+    config_file: Path = CONFIGS_DIR / "default.yaml",
+    refresh_enrich: bool = False,
+    refresh_all: bool = False,
+) -> None:
+    """Export the Hong Kong value research CSV."""
+    config = load_app_config(config_file)
+    if config.market != "hk":
+        console.print("`hk` only supports Hong Kong configs.")
+        raise typer.Exit(code=1)
+
+    console.print("Step 1/3: Fetching Hong Kong spot data.")
+    _fetch_spot_full(config_file)
+    console.print("Step 2/3: No built-in filtering.")
+    console.print("Step 3/3: Building research view.")
+    _build_hk_research_view(
+        config_file,
+        refresh_enrich=refresh_enrich or refresh_all,
+    )
+
+
+@app.command("us")
+def us(
+    config_file: Path = CONFIGS_DIR / "us.yaml",
+    refresh_enrich: bool = False,
+    refresh_all: bool = False,
+) -> None:
+    """Export the United States value research CSV."""
+    config = load_app_config(config_file)
+    if config.market != "us":
+        console.print("`us` only supports United States configs.")
+        raise typer.Exit(code=1)
+
+    console.print("Step 1/3: Fetching United States spot data.")
+    _fetch_spot_full(config_file)
+    console.print("Step 2/3: No built-in filtering.")
+    console.print("Step 3/3: Building research view.")
+    _build_us_research_view(
+        config_file,
+        refresh_enrich=refresh_enrich or refresh_all,
+    )
+
+
+@app.command("cn")
+def cn(
+    config_file: Path = CONFIGS_DIR / "cn.yaml",
+    refresh_enrich: bool = False,
+    refresh_all: bool = False,
+) -> None:
+    """Export the China A-share value research CSV."""
+    config = load_app_config(config_file)
+    if config.market != "cn":
+        console.print("`cn` only supports China A-share configs.")
+        raise typer.Exit(code=1)
+
+    console.print("Step 1/3: Fetching China A-share spot data.")
+    _fetch_spot_full(config_file)
+    console.print("Step 2/3: No built-in filtering.")
+    console.print("Step 3/3: Building research view.")
+    _build_cn_research_view(
+        config_file,
+        refresh_enrich=refresh_enrich or refresh_all,
+    )

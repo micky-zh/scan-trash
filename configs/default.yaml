@@ -1,21 +1,12 @@
 name: default
 version: "0.1"
-description: Default config for Hong Kong value screening research.
+description: Default config for Hong Kong value research export.
+market: hk
 fetch:
   enabled: true
-  apply_blacklist: true
-  blacklist_file: rules/blacklists/default.yaml
-baseline:
-  rule_file: rules/screening/hk_spot_baseline.yaml
-financial:
-  financial_csv_path: data/raw/hk_financial_indicators.csv
-  code_column: 代码
-  rule_file: rules/screening/baseline.yaml
 output:
   save_csv: true
   raw_csv_path: data/raw/hk_spot_full.csv
-  screened_csv_path: data/processed/hk_screened.csv
-  enriched_screened_csv_path: data/processed/hk_screened_enriched.csv
-  enriched_cache_csv_path: data/raw/hk_screened_enriched_cache.csv
-  financial_screened_csv_path: data/processed/hk_financial_screened.csv
+  enriched_cache_csv_path: data/raw/hk_enriched_cache.csv
+  research_csv_path: data/processed/hk_research_view.csv
 sector_profiles: []

@@ -1,4 +1,4 @@
-"""HK value screener package."""
+"""Stock research CSV export package."""
 
 __all__ = ["__version__"]
 

@@ -1,0 +1,12 @@
+name: us
+version: "0.1"
+description: Default config for United States value research export.
+market: us
+fetch:
+  enabled: true
+output:
+  save_csv: true
+  raw_csv_path: data/raw/us_spot_full.csv
+  enriched_cache_csv_path: data/raw/us_enriched_cache.csv
+  research_csv_path: data/processed/us_research_view.csv
+sector_profiles: []

@@ -1,14 +1,13 @@
 [project]
 name = "hk-value-screener"
 version = "0.1.0"
-description = "A disciplined Hong Kong equities value screening system."
+description = "A simple stock research CSV export toolkit."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "akshare>=1.17.0",
   "pandas>=2.2.3",
   "pydantic>=2.11.0",
-  "pypinyin>=0.55.0",
   "pyyaml>=6.0.2",
   "rich>=14.0.0",
   "typer>=0.16.0",
@@ -21,7 +20,7 @@ dev = [
 ]
 
 [project.scripts]
-hkvs = "hk_value_screener.cli:app"
+vr = "hk_value_screener.cli:app"
 
 [build-system]
 requires = ["hatchling"]
