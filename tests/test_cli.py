@@ -1,6 +1,13 @@
 import pandas as pd
+import pytest
+import typer
 
-from hk_value_screener.cli import _financial_history_cache_complete, _financial_history_candidates
+from hk_value_screener.cli import (
+    _financial_history_cache_complete,
+    _financial_history_candidates,
+    _financial_history_missing_statements,
+    filings,
+)
 
 
 def test_us_financial_history_candidates_skip_non_company_symbols() -> None:
@@ -61,3 +68,21 @@ def test_financial_history_cache_complete_requires_all_market_files(tmp_path) ->
     (tmp_path / "abstracts" / "000001.csv").write_text("代码\n000001\n")
 
     assert _financial_history_cache_complete("cn", "000001", tmp_path)
+
+
+def test_financial_history_missing_statements_detects_partial_cache(tmp_path) -> None:
+    (tmp_path / "balance").mkdir()
+    (tmp_path / "income").mkdir()
+    (tmp_path / "balance" / "AAPL.csv").write_text("代码\nAAPL\n")
+
+    assert _financial_history_missing_statements("us", "AAPL", tmp_path) == [
+        "income",
+        "cashflow",
+    ]
+
+
+def test_filings_rejects_invalid_workers() -> None:
+    with pytest.raises(typer.Exit) as exc_info:
+        filings(market="cn", workers=0)
+
+    assert exc_info.value.exit_code == 1

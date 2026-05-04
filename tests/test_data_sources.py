@@ -1,9 +1,16 @@
 import pandas as pd
 
 from hk_value_screener.data_sources import (
+    CN_FILING_CATEGORIES,
     CN_SPOT_FULL_COLUMN_ORDER,
+    cleanup_filing_pdf_cache,
+    cache_us_financial_history,
+    cache_us_filings,
+    HK_FILING_CATEGORIES,
     HK_SPOT_FULL_COLUMN_ORDER,
     US_SPOT_FULL_COLUMN_ORDER,
+    _fill_missing_filing_categories,
+    _parse_hkex_title_search,
     build_cn_research_view,
     build_hk_research_view,
     build_us_research_view,
@@ -13,8 +20,11 @@ from hk_value_screener.data_sources import (
     financial_history_cache_path,
     merge_filing_index_cache,
     merge_financial_history_cache,
+    prune_recent_filing_index,
+    prune_recent_financial_history,
     normalize_cn_spot_full,
     normalize_hk_spot_full,
+    normalize_us_filing_ticker,
     normalize_us_spot_full,
     parse_cninfo_disclosure_link,
 )
@@ -411,3 +421,277 @@ def test_merge_filing_index_cache_appends_only_new_links() -> None:
 
     assert added_count == 1
     assert list(merged["公告链接"]) == ["https://example.com/old", "https://example.com/new"]
+
+
+def test_prune_recent_financial_history_keeps_recent_rows() -> None:
+    frame = pd.DataFrame(
+        [
+            {"日期": "2020-12-31", "值": 1},
+            {"日期": "2021-06-30", "值": 2},
+            {"日期": "2024-12-31", "值": 3},
+        ]
+    )
+
+    pruned = prune_recent_financial_history(
+        frame,
+        report_column="日期",
+        as_of=pd.Timestamp("2026-05-05"),
+    )
+
+    assert pruned["值"].tolist() == [2, 3]
+
+
+def test_prune_recent_filing_index_keeps_recent_rows() -> None:
+    frame = pd.DataFrame(
+        [
+            {"公告时间": "2020-12-31 10:00:00", "公告链接": "old"},
+            {"公告时间": "2021-06-30 10:00:00", "公告链接": "keep"},
+            {"公告时间": "2024-12-31 10:00:00", "公告链接": "keep2"},
+        ]
+    )
+
+    pruned = prune_recent_filing_index(frame, as_of=pd.Timestamp("2026-05-05"))
+
+    assert pruned["公告链接"].tolist() == ["keep", "keep2"]
+
+
+def test_cleanup_filing_pdf_cache_removes_orphans(tmp_path) -> None:
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    kept_pdf = pdf_dir / "2024-12-31_keep.pdf"
+    old_pdf = pdf_dir / "2020-12-31_old.pdf"
+    extra_pdf = pdf_dir / "2024-12-31_extra.pdf"
+    kept_pdf.write_text("kept")
+    old_pdf.write_text("old")
+    extra_pdf.write_text("extra")
+
+    index_frame = pd.DataFrame(
+        [
+            {
+                "公告时间": "2024-12-31 10:00:00",
+                "本地文件路径": str(kept_pdf),
+            }
+        ]
+    )
+
+    deleted = cleanup_filing_pdf_cache(
+        index_frame,
+        pdf_dir,
+        as_of=pd.Timestamp("2026-05-05"),
+    )
+
+    assert deleted == 2
+    assert kept_pdf.exists()
+    assert not old_pdf.exists()
+    assert not extra_pdf.exists()
+
+
+def test_normalize_us_filing_ticker_keeps_class_shares() -> None:
+    assert normalize_us_filing_ticker("105.AAPL") == "AAPL"
+    assert normalize_us_filing_ticker("BRK.B") == "BRK-B"
+
+
+def test_cache_us_filings_writes_recent_index_and_prunes_raw(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root_dir = tmp_path / "data" / "raw" / "filings" / "us"
+    old_dir = root_dir / "AAPL" / "raw" / "000032019326000000"
+    old_dir.mkdir(parents=True)
+    (old_dir / "old.txt").write_text("old")
+
+    monkeypatch.setattr(
+        "hk_value_screener.data_sources.load_sec_company_ticker_map",
+        lambda: {"AAPL": "0000320193"},
+    )
+    monkeypatch.setattr(
+        "hk_value_screener.data_sources._retention_cutoff",
+        lambda years=5, as_of=None: pd.Timestamp("2021-01-01"),
+    )
+
+    submissions_payload = {
+        "name": "Apple Inc.",
+        "filings": {
+            "recent": {
+                "form": ["10-K", "10-K"],
+                "accessionNumber": ["0000320193-26-000001", "0000320193-20-000001"],
+                "filingDate": ["2026-01-01", "2020-01-01"],
+                "reportDate": ["2025-12-31", "2019-12-31"],
+                "primaryDocument": ["aapl-20251231.htm", "aapl-20191231.htm"],
+                "primaryDocDescription": ["Annual report", "Annual report"],
+                "isXBRL": [True, True],
+                "isInlineXBRL": [True, True],
+                "period": ["2025-12-31", "2019-12-31"],
+            },
+            "files": [],
+        },
+    }
+
+    def fake_request_json(url: str, timeout_seconds: int = 30, user_agent: str | None = None):
+        if "submissions/CIK0000320193.json" in url:
+            return submissions_payload
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr("hk_value_screener.data_sources._request_json", fake_request_json)
+
+    result = cache_us_filings("AAPL", root_dir=root_dir, download=False)
+
+    assert result.status == "成功"
+    index_path = root_dir / "AAPL" / "index.csv"
+    assert index_path.exists()
+
+    frame = pd.read_csv(index_path)
+    assert frame["accession_number"].tolist() == ["0000320193-26-000001"]
+    assert not old_dir.exists()
+
+
+def test_cache_us_filings_downloads_only_primary_document_and_index(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root_dir = tmp_path / "data" / "raw" / "filings" / "us"
+    root_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        "hk_value_screener.data_sources.load_sec_company_ticker_map",
+        lambda: {"AAPL": "0000320193"},
+    )
+    monkeypatch.setattr(
+        "hk_value_screener.data_sources._retention_cutoff",
+        lambda years=5, as_of=None: pd.Timestamp("2021-01-01"),
+    )
+
+    submissions_payload = {
+        "name": "Apple Inc.",
+        "filings": {
+            "recent": {
+                "form": ["10-K"],
+                "accessionNumber": ["0000320193-26-000001"],
+                "filingDate": ["2026-01-01"],
+                "reportDate": ["2025-12-31"],
+                "primaryDocument": ["aapl-20251231.htm"],
+                "primaryDocDescription": ["Annual report"],
+                "isXBRL": [True],
+                "isInlineXBRL": [True],
+                "period": ["2025-12-31"],
+            },
+            "files": [],
+        },
+    }
+    archive_payload = {"directory": {"item": [{"name": "index.html"}, {"name": "extra.xml"}]}}
+    requested_urls: list[str] = []
+
+    def fake_request_json(url: str, timeout_seconds: int = 30, user_agent: str | None = None):
+        requested_urls.append(url)
+        if "submissions/CIK0000320193.json" in url:
+            return submissions_payload
+        if url.endswith("/index.json"):
+            return archive_payload
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    def fake_download_file(
+        url: str,
+        path,
+        refresh: bool = False,
+        timeout_seconds: int = 30,
+        user_agent: str | None = None,
+    ):
+        requested_urls.append(url)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("downloaded")
+        return True
+
+    monkeypatch.setattr("hk_value_screener.data_sources._request_json", fake_request_json)
+    monkeypatch.setattr("hk_value_screener.data_sources.download_file", fake_download_file)
+
+    result = cache_us_filings("AAPL", root_dir=root_dir, download=True)
+
+    assert result.status == "成功"
+    assert any(url.endswith("/index.json") for url in requested_urls)
+    assert any(url.endswith("aapl-20251231.htm") for url in requested_urls)
+    assert not any(url.endswith("extra.xml") for url in requested_urls)
+
+    local_dir = root_dir / "AAPL" / "raw" / "000032019326000001"
+    assert (local_dir / "index.json").exists()
+    assert (local_dir / "aapl-20251231.htm").exists()
+    assert not (local_dir / "extra.xml").exists()
+
+
+def test_cache_us_financial_history_can_fetch_only_requested_statements(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import sys
+    import types
+
+    fake_akshare = types.ModuleType("akshare")
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_stock_financial_us_report_em(stock: str, symbol: str, indicator: str):
+        calls.append((stock, symbol, indicator))
+        return pd.DataFrame([{"REPORT_DATE": "2025-12-31", "value": 1}])
+
+    fake_akshare.stock_financial_us_report_em = fake_stock_financial_us_report_em
+    monkeypatch.setitem(sys.modules, "akshare", fake_akshare)
+
+    root_dir = tmp_path / "data" / "raw" / "financials" / "us"
+    result = cache_us_financial_history(
+        "AAPL",
+        root_dir=root_dir,
+        statements=["income"],
+    )
+
+    assert result.status == "成功"
+    assert calls == [("AAPL", "综合损益表", "年报")]
+    assert result.added_rows_by_statement == {"balance": 0, "income": 1, "cashflow": 0}
+    assert not (root_dir / "balance" / "AAPL.csv").exists()
+    assert (root_dir / "income" / "AAPL.csv").exists()
+    assert not (root_dir / "cashflow" / "AAPL.csv").exists()
+
+
+def test_cn_filing_categories_keep_stable_order() -> None:
+    assert CN_FILING_CATEGORIES == ["一季报", "半年报", "三季报", "年报"]
+
+
+def test_hk_filing_categories_keep_stable_order() -> None:
+    assert HK_FILING_CATEGORIES == ["一季报", "半年报", "三季报", "年报"]
+
+
+def test_fill_missing_filing_categories_from_titles() -> None:
+    frame = pd.DataFrame(
+        [
+            {"公告标题": "2025年年度报告"},
+            {"公告标题": "2025年半年度报告"},
+            {"公告标题": "2025年第一季度报告"},
+            {"公告标题": "2025年第三季度报告"},
+        ]
+    )
+
+    filled = _fill_missing_filing_categories(frame)
+
+    assert filled["公告分类"].tolist() == ["年报", "半年报", "一季报", "三季报"]
+
+
+def test_parse_hkex_title_search_extracts_financial_pdf() -> None:
+    html = """
+    <tr>
+      <td class="release-time"><span>Release Time: </span>09/04/2026 18:14</td>
+      <td><span>Stock Code: </span>00700</td>
+      <td><span>Stock Short Name: </span>TENCENT</td>
+      <td>
+        <div class="headline">Financial Statements/ESG Information - [Annual Report]<br/></div>
+        <div class="doc-link">
+          <a href="/listedco/listconews/sehk/2026/0409/2026040901231.pdf">2025 Annual Report</a>
+        </div>
+      </td>
+    </tr>
+    """
+
+    frame = _parse_hkex_title_search(html, "700")
+
+    assert frame.loc[0, "代码"] == "00700"
+    assert frame.loc[0, "公告分类"] == "年报"
+    assert frame.loc[0, "公告标题"] == "2025 Annual Report"
+    assert frame.loc[0, "pdf_url"] == (
+        "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0409/2026040901231.pdf"
+    )

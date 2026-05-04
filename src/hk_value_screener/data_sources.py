@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import io
+import json
+import os
 import re
 import signal
+import shutil
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime
+from html import unescape
+from functools import lru_cache
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
 import pandas as pd
@@ -335,6 +340,23 @@ MARKET_CODE_PAD_WIDTH = {
     "us": 0,
     "cn": 6,
 }
+
+CN_FILING_CATEGORIES = ["一季报", "半年报", "三季报", "年报"]
+HK_FILING_CATEGORIES = ["一季报", "半年报", "三季报", "年报"]
+US_FILING_CATEGORIES = ["10-K", "10-Q", "20-F", "6-K"]
+US_FILING_CATEGORY_ALIASES = {
+    "年报": "10-K",
+}
+SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "hk-value-screener/1.0")
+SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+SEC_SUBMISSIONS_FILE_URL = "https://data.sec.gov/submissions/{name}"
+SEC_ARCHIVE_INDEX_URL = (
+    "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/index.json"
+)
+SEC_ARCHIVE_FILE_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{name}"
+HKEX_ACTIVE_STOCK_URL = "https://www1.hkexnews.hk/ncms/script/eds/activestock_sehk_e.json"
+HKEX_TITLE_SEARCH_URL = "https://www1.hkexnews.hk/search/titlesearch.xhtml"
 
 
 @dataclass(frozen=True)
@@ -1383,6 +1405,14 @@ def financial_history_cache_path(
     return root / statement / f"{normalized_code}.csv"
 
 
+def financial_history_statements(market: str) -> list[str]:
+    return {
+        "cn": ["indicators", "abstracts"],
+        "hk": ["balance", "income", "cashflow"],
+        "us": ["balance", "income", "cashflow"],
+    }[market]
+
+
 def _read_financial_history_cache(market: str, code: str, statement: str) -> pd.DataFrame:
     return _read_csv_if_present(financial_history_cache_path(market, code, statement))
 
@@ -1445,13 +1475,93 @@ def filing_pdf_cache_path(
     return root / normalized_code / "pdfs" / f"{filename}.pdf"
 
 
-def download_file(url: str, path: Path, refresh: bool = False, timeout_seconds: int = 30) -> bool:
+def _build_request(url: str, user_agent: str | None = None) -> Request:
+    headers = {"User-Agent": user_agent or "Mozilla/5.0"}
+    return Request(url, headers=headers)
+
+
+def _request_json(url: str, timeout_seconds: int = 30, user_agent: str | None = None) -> object:
+    request = _build_request(url, user_agent=user_agent)
+    with urlopen(request, timeout=timeout_seconds) as response:
+        return json.loads(response.read().decode("utf-8-sig", "ignore"))
+
+
+def _safe_us_ticker(value: object) -> str:
+    text = str(value).strip().upper()
+    if not text:
+        return text
+    if re.fullmatch(r"\d+\..+", text):
+        return text.split(".", 1)[1]
+    if "." in text:
+        return text.replace(".", "-")
+    return text
+
+
+def normalize_us_filing_ticker(value: object) -> str:
+    return _safe_us_ticker(value)
+
+
+def resolve_us_cik(ticker: str) -> str:
+    normalized = normalize_us_filing_ticker(ticker)
+    if normalized.isdigit():
+        return normalized.zfill(10)
+    mapping = load_sec_company_ticker_map()
+    cik = mapping.get(normalized)
+    if cik is None:
+        raise ValueError(f"CIK not found for US ticker: {ticker}")
+    return cik
+
+
+@lru_cache(maxsize=1)
+def load_sec_company_ticker_map() -> dict[str, str]:
+    data = _request_json(SEC_COMPANY_TICKERS_URL, user_agent=SEC_USER_AGENT)
+    if not isinstance(data, dict):
+        return {}
+
+    mapping: dict[str, str] = {}
+    for item in data.values():
+        if not isinstance(item, dict):
+            continue
+        ticker = str(item.get("ticker", "")).strip().upper()
+        cik = str(item.get("cik_str", "")).strip()
+        if not ticker or not cik:
+            continue
+        mapping.setdefault(ticker, cik.zfill(10))
+    return mapping
+
+
+def sec_submissions_url(cik: str) -> str:
+    return SEC_SUBMISSIONS_URL.format(cik=str(cik).zfill(10))
+
+
+def sec_archive_index_url(cik: str, accession_number: str) -> str:
+    return SEC_ARCHIVE_INDEX_URL.format(
+        cik=str(cik).lstrip("0") or "0",
+        accession=accession_number.replace("-", ""),
+    )
+
+
+def sec_archive_file_url(cik: str, accession_number: str, name: str) -> str:
+    return SEC_ARCHIVE_FILE_URL.format(
+        cik=str(cik).lstrip("0") or "0",
+        accession=accession_number.replace("-", ""),
+        name=quote(str(name)),
+    )
+
+
+def download_file(
+    url: str,
+    path: Path,
+    refresh: bool = False,
+    timeout_seconds: int = 30,
+    user_agent: str | None = None,
+) -> bool:
     if not url:
         return False
     if path.exists() and path.stat().st_size > 0 and not refresh:
         return False
 
-    request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    request = _build_request(url, user_agent=user_agent)
     with urlopen(request, timeout=timeout_seconds) as response:
         content = response.read()
     if not content:
@@ -1482,6 +1592,451 @@ def merge_filing_index_cache(
 
     merged = pd.concat([existing, new_rows], ignore_index=True, sort=False)
     return merged, len(new_rows)
+
+
+def _retention_cutoff(years: int = 5, as_of: datetime | pd.Timestamp | None = None) -> pd.Timestamp:
+    anchor = pd.Timestamp(as_of or datetime.now())
+    return anchor.normalize() - pd.DateOffset(years=years)
+
+
+def _prune_recent_rows(
+    frame: pd.DataFrame,
+    date_columns: list[str],
+    years: int = 5,
+    as_of: datetime | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+
+    parsed_dates = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
+    for column in date_columns:
+        if column not in frame.columns:
+            continue
+        parsed_dates = parsed_dates.combine_first(pd.to_datetime(frame[column], errors="coerce"))
+
+    if parsed_dates.notna().sum() == 0:
+        return frame.copy()
+
+    cutoff = _retention_cutoff(years=years, as_of=as_of)
+    return frame.loc[parsed_dates >= cutoff].copy()
+
+
+def prune_recent_financial_history(
+    frame: pd.DataFrame,
+    report_column: str,
+    years: int = 5,
+    as_of: datetime | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    return _prune_recent_rows(frame, [report_column], years=years, as_of=as_of)
+
+
+def prune_recent_filing_index(
+    frame: pd.DataFrame,
+    years: int = 5,
+    as_of: datetime | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    return _prune_recent_rows(frame, ["公告日期", "公告时间"], years=years, as_of=as_of)
+
+
+def prune_recent_us_filing_index(
+    frame: pd.DataFrame,
+    years: int = 5,
+    as_of: datetime | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    return _prune_recent_rows(frame, ["filing_date", "report_date"], years=years, as_of=as_of)
+
+
+def cleanup_filing_pdf_cache(
+    index_frame: pd.DataFrame,
+    pdf_dir: Path,
+    years: int = 5,
+    as_of: datetime | pd.Timestamp | None = None,
+) -> int:
+    if not pdf_dir.exists():
+        return 0
+
+    if index_frame.empty:
+        keep_paths: set[Path] | None = set()
+    else:
+        pruned_index = prune_recent_filing_index(index_frame, years=years, as_of=as_of)
+        if "本地文件路径" not in pruned_index.columns:
+            return 0
+        keep_paths = {Path(value).resolve() for value in pruned_index["本地文件路径"].dropna().astype(str)}
+
+    deleted_files = 0
+    for pdf_path in pdf_dir.glob("*.pdf"):
+        if keep_paths is not None and pdf_path.resolve() in keep_paths:
+            continue
+        pdf_path.unlink(missing_ok=True)
+        deleted_files += 1
+    return deleted_files
+
+
+def cleanup_us_filing_raw_cache(
+    index_frame: pd.DataFrame,
+    raw_dir: Path,
+    years: int = 5,
+    as_of: datetime | pd.Timestamp | None = None,
+) -> int:
+    if not raw_dir.exists():
+        return 0
+
+    if index_frame.empty:
+        keep_dirs: set[Path] = set()
+    else:
+        pruned_index = prune_recent_us_filing_index(index_frame, years=years, as_of=as_of)
+        if "本地目录" not in pruned_index.columns:
+            return 0
+        keep_dirs = {Path(value).resolve() for value in pruned_index["本地目录"].dropna().astype(str)}
+
+    deleted_dirs = 0
+    for child in raw_dir.iterdir():
+        if not child.is_dir():
+            continue
+        if keep_dirs and child.resolve() in keep_dirs:
+            continue
+        if not keep_dirs or child.resolve() not in keep_dirs:
+            shutil.rmtree(child, ignore_errors=True)
+            deleted_dirs += 1
+    return deleted_dirs
+
+
+def _normalize_us_filing_form(form: object) -> str:
+    text = str(form).strip().upper()
+    if not text:
+        return text
+    return US_FILING_CATEGORY_ALIASES.get(text, text)
+
+
+def _us_submission_pages(submissions: object) -> list[object]:
+    if not isinstance(submissions, dict):
+        return []
+
+    pages: list[object] = [submissions]
+    filings = submissions.get("filings", {})
+    if not isinstance(filings, dict):
+        return pages
+
+    for file_item in filings.get("files", []) or []:
+        if not isinstance(file_item, dict):
+            continue
+        name = str(file_item.get("name", "")).strip()
+        if not name:
+            continue
+        try:
+            pages.append(_request_json(SEC_SUBMISSIONS_FILE_URL.format(name=name), user_agent=SEC_USER_AGENT))
+        except Exception:  # pragma: no cover - network failure path
+            continue
+
+    return pages
+
+
+def _us_submission_records(
+    submissions: object,
+    ticker: str,
+    cik: str,
+    root_dir: Path | None = None,
+    years: int = 5,
+    as_of: datetime | pd.Timestamp | None = None,
+) -> list[dict[str, object]]:
+    pages = _us_submission_pages(submissions)
+    if not pages:
+        return []
+
+    cutoff = _retention_cutoff(years=years, as_of=as_of)
+    records: list[dict[str, object]] = []
+    normalized_ticker = normalize_us_filing_ticker(ticker)
+    cik10 = str(cik).zfill(10)
+    cik_int = str(int(cik10))
+
+    for payload in pages:
+        if not isinstance(payload, dict):
+            continue
+        filings = payload.get("filings", {})
+        if not isinstance(filings, dict):
+            continue
+        recent = filings.get("recent", {})
+        if not isinstance(recent, dict):
+            continue
+
+        forms = recent.get("form", []) or []
+        accession_numbers = recent.get("accessionNumber", []) or []
+        filing_dates = recent.get("filingDate", []) or []
+        report_dates = recent.get("reportDate", []) or []
+        primary_documents = recent.get("primaryDocument", []) or []
+        descriptions = recent.get("primaryDocDescription", []) or []
+        xbrl_flags = recent.get("isXBRL", []) or []
+        inline_flags = recent.get("isInlineXBRL", []) or []
+        periods = recent.get("period", []) or []
+
+        max_len = max(
+            len(forms),
+            len(accession_numbers),
+            len(filing_dates),
+            len(report_dates),
+            len(primary_documents),
+            len(descriptions),
+            len(xbrl_flags),
+            len(inline_flags),
+            len(periods),
+            0,
+        )
+
+        for index in range(max_len):
+            form = _normalize_us_filing_form(forms[index] if index < len(forms) else "")
+            if form not in US_FILING_CATEGORIES:
+                continue
+
+            filing_date = str(filing_dates[index] if index < len(filing_dates) else "").strip()
+            filing_ts = pd.to_datetime(filing_date, errors="coerce")
+            if pd.notna(filing_ts) and filing_ts < cutoff:
+                continue
+
+            accession_number = str(
+                accession_numbers[index] if index < len(accession_numbers) else ""
+            ).strip()
+            if not accession_number:
+                continue
+
+            primary_document = str(
+                primary_documents[index] if index < len(primary_documents) else ""
+            ).strip()
+            report_date = str(report_dates[index] if index < len(report_dates) else "").strip()
+            description = str(descriptions[index] if index < len(descriptions) else "").strip()
+            local_dir = us_filing_local_dir(normalized_ticker, accession_number, root_dir=root_dir)
+
+            records.append(
+                {
+                    "ticker": normalized_ticker,
+                    "cik": cik10,
+                    "company_name": str(payload.get("name", "")).strip(),
+                    "form": form,
+                    "filing_date": filing_date,
+                    "report_date": report_date,
+                    "accession_number": accession_number,
+                    "primary_document": primary_document,
+                    "primary_doc_description": description,
+                    "is_xbrl": bool(xbrl_flags[index]) if index < len(xbrl_flags) else False,
+                    "is_inline_xbrl": bool(inline_flags[index]) if index < len(inline_flags) else False,
+                    "period": str(periods[index] if index < len(periods) else "").strip(),
+                    "filing_url": f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_number.replace('-', '')}/{primary_document}"
+                    if primary_document
+                    else "",
+                    "archive_index_url": sec_archive_index_url(cik10, accession_number),
+                    "submission_url": sec_submissions_url(cik10),
+                    "本地目录": str(local_dir),
+                    "本地文件路径": str(local_dir / primary_document) if primary_document else "",
+                    "下载状态": "未下载",
+                }
+            )
+
+    return records
+
+
+def us_filing_local_dir(
+    ticker: str,
+    accession_number: str,
+    root_dir: Path | None = None,
+) -> Path:
+    normalized_ticker = normalize_us_filing_ticker(ticker)
+    root = root_dir or RAW_DATA_DIR / "filings" / "us"
+    accession_nodash = accession_number.replace("-", "")
+    return root / normalized_ticker / "raw" / accession_nodash
+
+
+def us_filing_index_path(
+    ticker: str,
+    root_dir: Path | None = None,
+) -> Path:
+    normalized_ticker = normalize_us_filing_ticker(ticker)
+    root = root_dir or RAW_DATA_DIR / "filings" / "us"
+    return root / normalized_ticker / "index.csv"
+
+
+def merge_us_filing_index_cache(
+    existing: pd.DataFrame,
+    fetched: pd.DataFrame,
+    refresh: bool = False,
+) -> tuple[pd.DataFrame, int]:
+    if fetched.empty:
+        return existing.copy(), 0
+    if existing.empty or "accession_number" not in existing.columns:
+        return fetched.copy(), len(fetched)
+    if refresh:
+        merged = pd.concat([existing, fetched], ignore_index=True, sort=False)
+        merged = merged.drop_duplicates(subset=["accession_number"], keep="last").reset_index(
+            drop=True
+        )
+        return merged, len(fetched)
+
+    existing_accessions = set(existing["accession_number"].dropna().astype(str).tolist())
+    new_rows = fetched[~fetched["accession_number"].astype(str).isin(existing_accessions)].copy()
+    if new_rows.empty:
+        return existing.copy(), 0
+
+    merged = pd.concat([existing, new_rows], ignore_index=True, sort=False)
+    merged = merged.drop_duplicates(subset=["accession_number"], keep="last").reset_index(drop=True)
+    return merged, len(new_rows)
+
+
+def _download_us_filing_raw_files(
+    row: pd.Series,
+    refresh: bool = False,
+    timeout_seconds: int = 30,
+) -> tuple[int, str]:
+    local_dir_text = str(row.get("本地目录", "")).strip()
+    if not local_dir_text:
+        return 0, "失败: 缺少本地目录"
+    local_dir = Path(local_dir_text)
+
+    accession_number = str(row.get("accession_number", "")).strip()
+    cik = str(row.get("cik", "")).strip()
+    if not accession_number or not cik:
+        return 0, "失败: 缺少 accession_number 或 cik"
+
+    archive_index_url = str(row.get("archive_index_url", "")).strip()
+    if not archive_index_url:
+        archive_index_url = sec_archive_index_url(cik, accession_number)
+
+    local_dir.mkdir(parents=True, exist_ok=True)
+    downloaded_files = 0
+
+    try:
+        archive_index = _request_json(
+            archive_index_url,
+            timeout_seconds=timeout_seconds,
+            user_agent=SEC_USER_AGENT,
+        )
+    except Exception as exc:  # pragma: no cover - network failure path
+        return 0, f"失败: {str(exc)[:120]}"
+
+    index_path = local_dir / "index.json"
+    index_path.write_text(json.dumps(archive_index, ensure_ascii=False, indent=2), encoding="utf-8")
+    downloaded_files += 1
+
+    primary_document = str(row.get("primary_document", "")).strip()
+    if primary_document:
+        file_url = sec_archive_file_url(cik, accession_number, primary_document)
+        file_path = local_dir / Path(primary_document)
+        if download_file(
+            file_url,
+            file_path,
+            refresh=refresh,
+            timeout_seconds=timeout_seconds,
+            user_agent=SEC_USER_AGENT,
+        ):
+            downloaded_files += 1
+
+    return downloaded_files, "已下载"
+
+
+def _fill_missing_filing_categories(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or "公告标题" not in frame.columns:
+        return frame.copy()
+
+    output = frame.copy()
+    if "公告分类" not in output.columns:
+        output["公告分类"] = pd.NA
+
+    categories = output["公告分类"].fillna("").astype(str)
+    titles = output["公告标题"].fillna("").astype(str)
+    missing = categories == ""
+
+    output.loc[missing & titles.str.contains("年度", na=False), "公告分类"] = "年报"
+    output.loc[missing & titles.str.contains("半年", na=False), "公告分类"] = "半年报"
+    output.loc[missing & titles.str.contains("一季|第一季度", na=False), "公告分类"] = "一季报"
+    output.loc[missing & titles.str.contains("三季|第三季度", na=False), "公告分类"] = "三季报"
+    return output
+
+
+def _request_text(
+    url: str,
+    timeout_seconds: int = 30,
+    user_agent: str | None = None,
+) -> str:
+    request = _build_request(url, user_agent=user_agent)
+    with urlopen(request, timeout=timeout_seconds) as response:
+        return response.read().decode("utf-8-sig", "ignore")
+
+
+def _hk_filing_category_from_text(text: str) -> str | None:
+    lowered = text.lower()
+    if "third quarterly" in lowered or "三季" in text or "第三季度" in text:
+        return "三季报"
+    if "first quarterly" in lowered or "一季" in text or "第一季度" in text:
+        return "一季报"
+    if "interim report" in lowered or "中期報告" in text or "中期报告" in text:
+        return "半年报"
+    if "annual report" in lowered or "年度報告" in text or "年度报告" in text:
+        return "年报"
+    return None
+
+
+def _strip_html(value: str) -> str:
+    text = re.sub(r"<br\\s*/?>", " ", value, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", unescape(text)).strip()
+
+
+def _hkex_stock_lookup() -> dict[str, dict[str, object]]:
+    rows = json.loads(_request_text(HKEX_ACTIVE_STOCK_URL))
+    return {str(row["c"]): row for row in rows}
+
+
+def _hkex_title_search_url(stock_id: object) -> str:
+    return f"{HKEX_TITLE_SEARCH_URL}?category=0&lang=EN&market=SEHK&stockId={stock_id}"
+
+
+def _parse_hkex_title_search(html: str, code: str, root_dir: Path | None = None) -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+    rows = re.findall(r"<tr>(.*?)</tr>", html, flags=re.S | re.I)
+    for row in rows:
+        if "/listedco/listconews/" not in row:
+            continue
+
+        release_match = re.search(r"Release Time:\s*</span>(.*?)</td>", row, flags=re.S | re.I)
+        name_match = re.search(r"Stock Short Name:\s*</span>(.*?)</td>", row, flags=re.S | re.I)
+        headline_match = re.search(r'<div class="headline">(.*?)</div>', row, flags=re.S | re.I)
+        link_match = re.search(r'<a href="([^"]+\.pdf)"[^>]*>(.*?)</a>', row, flags=re.S | re.I)
+        if not link_match:
+            continue
+
+        title = _strip_html(link_match.group(2))
+        headline = _strip_html(headline_match.group(1)) if headline_match else ""
+        category = _hk_filing_category_from_text(f"{headline} {title}")
+        if category is None:
+            continue
+
+        pdf_path = link_match.group(1)
+        pdf_url = pdf_path if pdf_path.startswith("http") else f"https://www1.hkexnews.hk{pdf_path}"
+        announcement_id = Path(urlparse(pdf_url).path).stem
+
+        records.append(
+            {
+                "代码": normalize_security_code(code, market="hk"),
+                "简称": _strip_html(name_match.group(1)) if name_match else "",
+                "公告分类": category,
+                "公告标题": title,
+                "公告时间": _strip_html(release_match.group(1)) if release_match else "",
+                "公告链接": pdf_url,
+                "公告日期": "",
+                "announcement_id": announcement_id,
+                "pdf_url": pdf_url,
+                "本地文件路径": str(
+                    filing_pdf_cache_path(
+                        "hk",
+                        code,
+                        announcement_id[:8],
+                        announcement_id,
+                        title,
+                        root_dir,
+                    )
+                ),
+                "下载状态": "未下载",
+            }
+        )
+
+    return pd.DataFrame(records)
 
 
 def merge_financial_history_cache(
@@ -1550,9 +2105,23 @@ def _save_financial_history_statement(
         report_column=report_column,
         refresh=refresh,
     )
+    merged = merged.drop_duplicates(subset=[report_column], keep="last").reset_index(drop=True)
+    merged = prune_recent_financial_history(merged, report_column=report_column)
     existing_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(existing_path, index=False)
     return added_rows
+
+
+def _selected_financial_history_statements(
+    market: str,
+    statements: list[str] | None,
+) -> list[str]:
+    all_statements = financial_history_statements(market)
+    if statements is None:
+        return all_statements
+
+    requested = set(statements)
+    return [statement for statement in all_statements if statement in requested]
 
 
 def _financial_history_failure_result(
@@ -1574,13 +2143,17 @@ def _financial_history_failure_result(
     )
 
 
-def cache_cn_annual_filings(
+def cache_cn_filings(
     code: str,
     root_dir: Path | None = None,
     refresh: bool = False,
     download: bool = False,
+    category: str = "年报",
 ) -> FilingCacheResult:
     import akshare as ak
+
+    if category not in CN_FILING_CATEGORIES:
+        raise ValueError(f"Unsupported China A-share filing category: {category}")
 
     normalized_code = normalize_security_code(code, market="cn")
     fetched_at = datetime.now().isoformat(timespec="seconds")
@@ -1591,7 +2164,7 @@ def cache_cn_annual_filings(
             frame = ak.stock_zh_a_disclosure_report_cninfo(
                 symbol=normalized_code,
                 market="沪深京",
-                category="年报",
+                category=category,
                 start_date="20000101",
                 end_date=datetime.now().strftime("%Y%m%d"),
             )
@@ -1612,6 +2185,7 @@ def cache_cn_annual_filings(
         fetched = frame.copy()
         fetched["代码"] = normalize_security_codes(fetched["代码"], market="cn")
         fetched.insert(1, "抓取时间", fetched_at)
+        fetched.insert(2, "公告分类", category)
 
         parsed_links = fetched["公告链接"].map(parse_cninfo_disclosure_link)
         fetched["announcement_id"] = parsed_links.map(lambda item: item["announcement_id"])
@@ -1634,6 +2208,117 @@ def cache_cn_annual_filings(
             axis=1,
         )
         fetched["下载状态"] = "未下载"
+
+        existing = _fill_missing_filing_categories(_read_csv_if_present(index_path))
+        merged, added_rows = merge_filing_index_cache(existing, fetched, refresh=refresh)
+
+        downloaded_files = 0
+        if download:
+            for row_index, row in fetched.iterrows():
+                pdf_path = Path(row["本地文件路径"])
+                try:
+                    downloaded = download_file(
+                        str(row["pdf_url"]),
+                        pdf_path,
+                        refresh=refresh,
+                    )
+                    status = "已下载" if downloaded or pdf_path.exists() else "下载失败"
+                    downloaded_files += int(downloaded)
+                except Exception as exc:  # pragma: no cover - network failure path
+                    status = f"下载失败: {str(exc)[:80]}"
+                fetched.loc[row_index, "下载状态"] = status
+
+            if refresh or existing.empty or "公告链接" not in existing.columns:
+                merged, added_rows = merge_filing_index_cache(existing, fetched, refresh=refresh)
+            else:
+                merged = pd.concat([existing, fetched], ignore_index=True, sort=False)
+                merged = merged.drop_duplicates(subset=["公告链接"], keep="last").reset_index(
+                    drop=True
+                )
+
+        merged = merged.drop_duplicates(subset=["公告链接"], keep="last").reset_index(drop=True)
+        merged = prune_recent_filing_index(merged)
+        cleanup_filing_pdf_cache(merged, index_path.parent / "pdfs")
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_csv(index_path, index=False)
+        return FilingCacheResult(
+            code=normalized_code,
+            added_rows=added_rows,
+            downloaded_files=downloaded_files,
+            index_path=index_path,
+            status="成功",
+        )
+    except Exception as exc:  # pragma: no cover - network failure path
+        return FilingCacheResult(
+            code=normalized_code,
+            added_rows=0,
+            downloaded_files=0,
+            index_path=index_path,
+            status=f"失败: {str(exc)[:120]}",
+        )
+
+
+def cache_cn_annual_filings(
+    code: str,
+    root_dir: Path | None = None,
+    refresh: bool = False,
+    download: bool = False,
+) -> FilingCacheResult:
+    return cache_cn_filings(
+        code,
+        root_dir=root_dir,
+        refresh=refresh,
+        download=download,
+        category="年报",
+    )
+
+
+def cache_hk_filings(
+    code: str,
+    root_dir: Path | None = None,
+    refresh: bool = False,
+    download: bool = False,
+    category: str = "年报",
+) -> FilingCacheResult:
+    if category not in HK_FILING_CATEGORIES:
+        raise ValueError(f"Unsupported Hong Kong filing category: {category}")
+
+    normalized_code = normalize_security_code(code, market="hk")
+    fetched_at = datetime.now().isoformat(timespec="seconds")
+    index_path = filing_index_cache_path("hk", normalized_code, root_dir)
+
+    try:
+        stock = _hkex_stock_lookup().get(normalized_code)
+        if stock is None:
+            raise ValueError(f"HKEX stock id not found for {normalized_code}")
+
+        frame = _parse_hkex_title_search(
+            _request_text(_hkex_title_search_url(stock["i"])),
+            normalized_code,
+            root_dir,
+        )
+        if frame.empty:
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            if not index_path.exists():
+                pd.DataFrame().to_csv(index_path, index=False)
+            return FilingCacheResult(
+                code=normalized_code,
+                added_rows=0,
+                downloaded_files=0,
+                index_path=index_path,
+                status="成功",
+            )
+
+        fetched = frame[frame["公告分类"] == category].copy()
+        if fetched.empty:
+            return FilingCacheResult(
+                code=normalized_code,
+                added_rows=0,
+                downloaded_files=0,
+                index_path=index_path,
+                status="成功",
+            )
+        fetched.insert(1, "抓取时间", fetched_at)
 
         existing = _read_csv_if_present(index_path)
         merged, added_rows = merge_filing_index_cache(existing, fetched, refresh=refresh)
@@ -1662,6 +2347,9 @@ def cache_cn_annual_filings(
                     drop=True
                 )
 
+        merged = merged.drop_duplicates(subset=["公告链接"], keep="last").reset_index(drop=True)
+        merged = prune_recent_filing_index(merged)
+        cleanup_filing_pdf_cache(merged, index_path.parent / "pdfs")
         index_path.parent.mkdir(parents=True, exist_ok=True)
         merged.to_csv(index_path, index=False)
         return FilingCacheResult(
@@ -1681,49 +2369,169 @@ def cache_cn_annual_filings(
         )
 
 
+def cache_us_filings(
+    code: str,
+    root_dir: Path | None = None,
+    refresh: bool = False,
+    download: bool = False,
+    category: str = "10-K",
+) -> FilingCacheResult:
+    normalized_ticker = normalize_us_filing_ticker(code)
+    normalized_category = _normalize_us_filing_form(category)
+    if normalized_category == "年报":
+        normalized_category = "10-K"
+    if normalized_category != "all" and normalized_category not in US_FILING_CATEGORIES:
+        raise ValueError(f"Unsupported US filing category: {category}")
+
+    try:
+        cik = resolve_us_cik(normalized_ticker)
+    except Exception as exc:
+        return FilingCacheResult(
+            code=normalized_ticker,
+            added_rows=0,
+            downloaded_files=0,
+            index_path=us_filing_index_path(normalized_ticker, root_dir),
+            status=f"失败: {str(exc)[:120]}",
+        )
+
+    index_path = us_filing_index_path(normalized_ticker, root_dir)
+    fetched_at = datetime.now().isoformat(timespec="seconds")
+    existing = _read_csv_if_present(index_path)
+
+    try:
+        submissions = _request_json(sec_submissions_url(cik), user_agent=SEC_USER_AGENT)
+        records = _us_submission_records(
+            submissions,
+            normalized_ticker,
+            cik,
+            root_dir=root_dir,
+            as_of=pd.Timestamp.now(),
+        )
+        if not records:
+            merged = prune_recent_us_filing_index(existing)
+            cleanup_us_filing_raw_cache(merged, index_path.parent / "raw")
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            merged.to_csv(index_path, index=False)
+            return FilingCacheResult(
+                code=normalized_ticker,
+                added_rows=0,
+                downloaded_files=0,
+                index_path=index_path,
+                status="成功",
+            )
+
+        fetched = pd.DataFrame(records)
+        if normalized_category != "all":
+            fetched = fetched[fetched["form"] == normalized_category].copy()
+
+        if fetched.empty:
+            merged = prune_recent_us_filing_index(existing)
+            cleanup_us_filing_raw_cache(merged, index_path.parent / "raw")
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            merged.to_csv(index_path, index=False)
+            return FilingCacheResult(
+                code=normalized_ticker,
+                added_rows=0,
+                downloaded_files=0,
+                index_path=index_path,
+                status="成功",
+            )
+
+        fetched.insert(1, "抓取时间", fetched_at)
+        fetched["下载状态"] = "未下载"
+
+        merged, added_rows = merge_us_filing_index_cache(existing, fetched, refresh=refresh)
+
+        downloaded_files = 0
+        if download:
+            for row_index, row in fetched.iterrows():
+                downloaded_count, status = _download_us_filing_raw_files(
+                    row,
+                    refresh=refresh,
+                )
+                downloaded_files += downloaded_count
+                fetched.loc[row_index, "下载状态"] = status
+
+            if refresh or existing.empty or "accession_number" not in existing.columns:
+                merged, added_rows = merge_us_filing_index_cache(existing, fetched, refresh=refresh)
+            else:
+                merged = pd.concat([existing, fetched], ignore_index=True, sort=False)
+                merged = merged.drop_duplicates(subset=["accession_number"], keep="last").reset_index(
+                    drop=True
+                )
+
+        merged = merged.drop_duplicates(subset=["accession_number"], keep="last").reset_index(
+            drop=True
+        )
+        merged = prune_recent_us_filing_index(merged)
+        cleanup_us_filing_raw_cache(merged, index_path.parent / "raw")
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_csv(index_path, index=False)
+        return FilingCacheResult(
+            code=normalized_ticker,
+            added_rows=added_rows,
+            downloaded_files=downloaded_files,
+            index_path=index_path,
+            status="成功",
+        )
+    except Exception as exc:  # pragma: no cover - network failure path
+        return FilingCacheResult(
+            code=normalized_ticker,
+            added_rows=0,
+            downloaded_files=0,
+            index_path=index_path,
+            status=f"失败: {str(exc)[:120]}",
+        )
+
+
 def cache_cn_financial_history(
     code: str,
     root_dir: Path | None = None,
     refresh: bool = False,
+    statements: list[str] | None = None,
 ) -> FinancialHistoryCacheResult:
     import akshare as ak
 
     normalized_code = normalize_security_code(code, market="cn")
     fetched_at = datetime.now().isoformat(timespec="seconds")
-    statements = ["indicators", "abstracts"]
+    all_statements = financial_history_statements("cn")
+    selected_statements = _selected_financial_history_statements("cn", statements)
     paths = {
         statement: financial_history_cache_path("cn", normalized_code, statement, root_dir)
-        for statement in statements
+        for statement in all_statements
     }
 
     try:
-        indicator_frame = ak.stock_financial_analysis_indicator(
-            symbol=normalized_code,
-            start_year="2000",
-        )
-        abstract_frame = ak.stock_financial_abstract_ths(
-            symbol=normalized_code,
-            indicator="按年度",
-        )
-
-        indicator_added = _save_financial_history_statement(
-            paths["indicators"],
-            indicator_frame,
-            normalized_code,
-            "cn",
-            fetched_at,
-            report_column="日期",
-            refresh=refresh,
-        )
-        abstract_added = _save_financial_history_statement(
-            paths["abstracts"],
-            abstract_frame,
-            normalized_code,
-            "cn",
-            fetched_at,
-            report_column="报告期",
-            refresh=refresh,
-        )
+        indicator_added = 0
+        abstract_added = 0
+        if "indicators" in selected_statements:
+            indicator_frame = ak.stock_financial_analysis_indicator(
+                symbol=normalized_code,
+                start_year="2000",
+            )
+            indicator_added = _save_financial_history_statement(
+                paths["indicators"],
+                indicator_frame,
+                normalized_code,
+                "cn",
+                fetched_at,
+                report_column="日期",
+                refresh=refresh,
+            )
+        if "abstracts" in selected_statements:
+            abstract_frame = ak.stock_financial_abstract_ths(
+                symbol=normalized_code,
+                indicator="按年度",
+            )
+            abstract_added = _save_financial_history_statement(
+                paths["abstracts"],
+                abstract_frame,
+                normalized_code,
+                "cn",
+                fetched_at,
+                report_column="报告期",
+                refresh=refresh,
+            )
 
         return FinancialHistoryCacheResult(
             code=normalized_code,
@@ -1748,36 +2556,28 @@ def cache_hk_financial_history(
     code: str,
     root_dir: Path | None = None,
     refresh: bool = False,
+    statements: list[str] | None = None,
 ) -> FinancialHistoryCacheResult:
     import akshare as ak
 
     normalized_code = normalize_security_code(code, market="hk")
     fetched_at = datetime.now().isoformat(timespec="seconds")
-    statements = ["balance", "income", "cashflow"]
+    all_statements = financial_history_statements("hk")
+    selected_statements = _selected_financial_history_statements("hk", statements)
     paths = {
         statement: financial_history_cache_path("hk", normalized_code, statement, root_dir)
-        for statement in statements
+        for statement in all_statements
     }
 
     try:
-        balance_frame = ak.stock_financial_hk_report_em(
-            stock=normalized_code,
-            symbol="资产负债表",
-            indicator="年度",
-        )
-        income_frame = ak.stock_financial_hk_report_em(
-            stock=normalized_code,
-            symbol="利润表",
-            indicator="年度",
-        )
-        cashflow_frame = ak.stock_financial_hk_report_em(
-            stock=normalized_code,
-            symbol="现金流量表",
-            indicator="年度",
-        )
-
-        added_rows = {
-            "balance": _save_financial_history_statement(
+        added_rows = {"balance": 0, "income": 0, "cashflow": 0}
+        if "balance" in selected_statements:
+            balance_frame = ak.stock_financial_hk_report_em(
+                stock=normalized_code,
+                symbol="资产负债表",
+                indicator="年度",
+            )
+            added_rows["balance"] = _save_financial_history_statement(
                 paths["balance"],
                 balance_frame,
                 normalized_code,
@@ -1785,8 +2585,14 @@ def cache_hk_financial_history(
                 fetched_at,
                 "REPORT_DATE",
                 refresh,
-            ),
-            "income": _save_financial_history_statement(
+            )
+        if "income" in selected_statements:
+            income_frame = ak.stock_financial_hk_report_em(
+                stock=normalized_code,
+                symbol="利润表",
+                indicator="年度",
+            )
+            added_rows["income"] = _save_financial_history_statement(
                 paths["income"],
                 income_frame,
                 normalized_code,
@@ -1794,8 +2600,14 @@ def cache_hk_financial_history(
                 fetched_at,
                 "REPORT_DATE",
                 refresh,
-            ),
-            "cashflow": _save_financial_history_statement(
+            )
+        if "cashflow" in selected_statements:
+            cashflow_frame = ak.stock_financial_hk_report_em(
+                stock=normalized_code,
+                symbol="现金流量表",
+                indicator="年度",
+            )
+            added_rows["cashflow"] = _save_financial_history_statement(
                 paths["cashflow"],
                 cashflow_frame,
                 normalized_code,
@@ -1803,8 +2615,7 @@ def cache_hk_financial_history(
                 fetched_at,
                 "REPORT_DATE",
                 refresh,
-            ),
-        }
+            )
         return FinancialHistoryCacheResult(
             code=normalized_code,
             added_rows_by_statement=added_rows,
@@ -1825,15 +2636,17 @@ def cache_us_financial_history(
     code: str,
     root_dir: Path | None = None,
     refresh: bool = False,
+    statements: list[str] | None = None,
 ) -> FinancialHistoryCacheResult:
     import akshare as ak
 
     normalized_code = normalize_security_code(code, market="us")
     fetched_at = datetime.now().isoformat(timespec="seconds")
-    statements = ["balance", "income", "cashflow"]
+    all_statements = financial_history_statements("us")
+    selected_statements = _selected_financial_history_statements("us", statements)
     paths = {
         statement: financial_history_cache_path("us", normalized_code, statement, root_dir)
-        for statement in statements
+        for statement in all_statements
     }
 
     def fetch_statement(symbol: str) -> pd.DataFrame:
@@ -1850,12 +2663,10 @@ def cache_us_financial_history(
         return frame if frame is not None else pd.DataFrame()
 
     try:
-        balance_frame = fetch_statement("资产负债表")
-        income_frame = fetch_statement("综合损益表")
-        cashflow_frame = fetch_statement("现金流量表")
-
-        added_rows = {
-            "balance": _save_financial_history_statement(
+        added_rows = {"balance": 0, "income": 0, "cashflow": 0}
+        if "balance" in selected_statements:
+            balance_frame = fetch_statement("资产负债表")
+            added_rows["balance"] = _save_financial_history_statement(
                 paths["balance"],
                 balance_frame,
                 normalized_code,
@@ -1863,8 +2674,10 @@ def cache_us_financial_history(
                 fetched_at,
                 "REPORT_DATE",
                 refresh,
-            ),
-            "income": _save_financial_history_statement(
+            )
+        if "income" in selected_statements:
+            income_frame = fetch_statement("综合损益表")
+            added_rows["income"] = _save_financial_history_statement(
                 paths["income"],
                 income_frame,
                 normalized_code,
@@ -1872,8 +2685,10 @@ def cache_us_financial_history(
                 fetched_at,
                 "REPORT_DATE",
                 refresh,
-            ),
-            "cashflow": _save_financial_history_statement(
+            )
+        if "cashflow" in selected_statements:
+            cashflow_frame = fetch_statement("现金流量表")
+            added_rows["cashflow"] = _save_financial_history_statement(
                 paths["cashflow"],
                 cashflow_frame,
                 normalized_code,
@@ -1881,8 +2696,7 @@ def cache_us_financial_history(
                 fetched_at,
                 "REPORT_DATE",
                 refresh,
-            ),
-        }
+            )
         return FinancialHistoryCacheResult(
             code=normalized_code,
             added_rows_by_statement=added_rows,

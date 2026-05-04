@@ -6,11 +6,11 @@
 
 - `vr hk/us/cn`：生成最终研究表，给 Excel 使用。
 - `vr financials`：缓存底层历史财务数据。
-- `vr filings`：缓存原始公告索引和 PDF/申报文件。
+- `vr filings`：缓存原始公告索引和主文档。
 
 原则：
 
-- 默认增量追加，不删除旧数据。
+- 默认增量追加，同时只保留最近 5 年的数据。
 - 研究表命令优先读本地缓存，没有缓存再联网抓取。
 - 全量任务要支持中断后继续跑。
 - 不恢复项目内置筛选逻辑，筛选交给 Excel。
@@ -34,46 +34,31 @@
 - [x] 已评估 A 股、港股、美股公告/PDF 数据源。
 - [x] 已实现 A 股年报公告索引：`uv run vr filings --market cn`。
 - [x] 已实现 A 股年报 PDF 下载：`uv run vr filings --market cn --download`。
+- [x] A 股 `filings` 已支持一季报、半年报、三季报和 `--category all`。
+- [x] 已实现港股公告/PDF 缓存：`uv run vr filings --market hk --download`。
+- [x] 已实现美股 SEC 主文档缓存：`uv run vr filings --market us --download`。
 - [x] A 股年报下载进度条已统一为项目自己的 Rich 进度条。
+- [x] `financials` 已支持单股更新：`uv run vr financials --market cn --symbol 000001`。
+- [x] `hk/us/cn` 已支持单股分析：`uv run vr cn --symbol 000001`。
+- [x] 财报 CSV、公告索引和原始文件已自动保留最近 5 年并清理旧文件。
 - [x] README 已补充中文命令说明。
+- [x] README 已增加推荐工作流：第一次初始化、日常更新、财报季更新、中断后续跑。
+- [x] README 已增加命令区别说明：研究表、结构化财报缓存、原始公告/申报文件。
+- [x] README 已增加常见问题：全量慢、`--missing-only`、财报更新、上游失败、文件失败。
 - [x] 删除未使用的空 `rules/` 目录。
 - [x] `.gitignore` 已忽略编辑器临时文件 `*.swp`。
 
 ## 下一步计划：代码和数据能力
 
-- [ ] 扩展 `filings --market cn` 支持半年报、一季报、三季报。
-- [ ] 实现港股公告/PDF 缓存：
-  - 优先评估港交所披露平台公告搜索。
-  - 目标输出 `data/raw/filings/hk/{代码}/index.csv`。
-  - PDF 保存到 `data/raw/filings/hk/{代码}/pdfs/`。
-- [ ] 实现美股 SEC EDGAR 申报文件缓存：
-  - 建立 ticker 到 CIK 映射。
-  - 拉取 `10-K`、`10-Q`、`20-F`、`6-K`。
-  - 保存索引到 `data/raw/filings/us/{代码}/index.csv`。
-  - 先保存官方 HTML/TXT/XBRL 原始文件，不强行转 PDF。
 - [ ] 为 `filings` 增加 `--market all`。
-- [ ] 为 `filings` 评估是否增加 `--workers`；默认仍应保守，避免上游限流。
+- [x] 为 `filings` 增加 `--workers`；默认仍应保守，避免上游限流。
 - [ ] 从本地历史财报缓存计算更多长期指标，例如 3/5 年收入 CAGR、净利润 CAGR、自由现金流稳定性。
-- [ ] 给 `financials --missing-only` 增加更细的跳过策略，例如只要任一文件缺失才补跑。
+- [x] `financials --missing-only` 已支持按文件补缺，已完整缓存的股票会跳过。
 
 ## 下一步计划：文档和使用体验
 
-- [ ] README 增加推荐工作流：
-  - 第一次初始化怎么跑。
-  - 每天/每周怎么跑。
-  - 财报季怎么跑。
-  - 中断后怎么继续跑。
-- [ ] README 增加“命令区别”说明：
-  - `vr hk/us/cn` 生成研究表。
-  - `vr financials` 缓存结构化财务数据。
-  - `vr filings` 缓存原始公告/PDF。
-- [ ] README 增加常见问题：
-  - 为什么全量任务很慢。
-  - 什么时候用 `--missing-only`。
-  - 什么时候不能用 `--missing-only`。
-  - 上游接口失败如何处理。
 - [ ] 增加示例输出字段说明，减少打开 CSV 后的理解成本。
-- [ ] 清理历史 README 中不准确或重复的命令说明。
+- [ ] 继续清理历史 README 中不准确或重复的命令说明。
 
 ## 暂不做
 

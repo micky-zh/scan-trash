@@ -10,6 +10,11 @@
 4. 导出 CSV
 5. 在 Excel 里自己筛选
 
+文档：
+
+- [变更记录](docs/CHANGELOG.md)
+- [待办事项](docs/TODO.md)
+
 ## 安装
 
 ```bash
@@ -22,7 +27,7 @@ uv sync
 uv run vr --help
 ```
 
-## 命令怎么用
+## 快速上手
 
 日常只想导出 Excel 研究表，跑下面三个命令之一：
 
@@ -38,12 +43,28 @@ uv run vr cn
 - `uv run vr us`：导出美股研究表。
 - `uv run vr cn`：导出 A 股研究表。
 
+只看单只股票时，也可以加 `--symbol`：
+
+```bash
+uv run vr cn --symbol 000001
+uv run vr hk --symbol 00700
+uv run vr us --symbol AAPL
+```
+
 想先把底层历史财报缓存到本地，跑 `financials`：
 
 ```bash
 uv run vr financials --market hk
 uv run vr financials --market us
 uv run vr financials --market cn
+```
+
+只更新单只股票时，可以直接加 `--symbol`：
+
+```bash
+uv run vr financials --market cn --symbol 000001
+uv run vr financials --market hk --symbol 00700
+uv run vr financials --market us --symbol AAPL
 ```
 
 如果上一次没跑完，想断点式补跑，使用 `--missing-only`：
@@ -54,13 +75,202 @@ uv run vr financials --market cn --missing-only
 
 `hk/us/cn` 研究表命令不强制依赖 `financials`。如果本地已有 `financials` 缓存，会优先使用本地缓存补充部分财报字段；如果没有缓存，会按原逻辑联网抓取。
 
-想下载原始年报公告和 PDF，跑 `filings`：
+想缓存原始公告和申报文件，跑 `filings`：
 
 ```bash
 uv run vr filings --market cn --download
 ```
 
-目前 `filings` 先支持 A 股年报。
+只更新单只股票时：
+
+```bash
+uv run vr filings --market cn --symbol 000001 --download
+uv run vr filings --market hk --symbol 00700 --download
+uv run vr filings --market us --symbol AAPL --download
+```
+
+目前 `filings` 支持：
+
+- A 股一季报、半年报、三季报和年报。
+- 港股一季报、半年报、三季报和年报。
+- 美股 `10-K`、`10-Q`、`20-F`、`6-K`，默认只保存索引和主文档，不转 PDF。
+- `filings` 默认串行，支持 `--workers`，建议先从小并发开始。
+
+## 命令区别
+
+| 命令 | 用途 | 输出 | 什么时候用 |
+| --- | --- | --- | --- |
+| `uv run vr hk` | 生成港股 Excel 研究表 | `data/processed/hk_research_view.csv` | 日常看港股、导出给 Excel 筛选 |
+| `uv run vr us` | 生成美股 Excel 研究表 | `data/processed/us_research_view.csv` | 日常看美股、导出给 Excel 筛选 |
+| `uv run vr cn` | 生成 A 股 Excel 研究表 | `data/processed/cn_research_view.csv` | 日常看 A 股、导出给 Excel 筛选 |
+| `uv run vr financials --market hk/us/cn` | 缓存结构化历史财报 | `data/raw/financials/...` | 第一次初始化、财报季更新、中断后补跑 |
+| `uv run vr financials --market cn --symbol 000001` | 更新单只股票结构化历史财报 | `data/raw/financials/...` | 只想补一只股票的财报缓存 |
+| `uv run vr filings --market cn` | 缓存 A 股公告索引 | `data/raw/filings/cn/{代码}/index.csv` | 想保留原始公告清单时 |
+| `uv run vr filings --market cn --download` | 下载 A 股公告原始文件 | `data/raw/filings/cn/{代码}/pdfs/*.pdf` | 想保存原始公告文件时 |
+| `uv run vr filings --market cn --symbol 000001 --download` | 更新单只股票公告索引和原始文件 | `data/raw/filings/cn/{代码}/...` | 只想补一只股票的公告和附件 |
+| `uv run vr filings --market hk` | 缓存港股公告索引 | `data/raw/filings/hk/{代码}/index.csv` | 想保留港股原始公告清单时 |
+| `uv run vr filings --market hk --download` | 下载港股公告原始文件 | `data/raw/filings/hk/{代码}/pdfs/*.pdf` | 想保存港股原始公告文件时 |
+| `uv run vr filings --market us` | 缓存美股申报索引 | `data/raw/filings/us/{代码}/index.csv` | 想保留 SEC 申报清单时 |
+| `uv run vr filings --market us --download` | 下载美股索引和主文档 | `data/raw/filings/us/{代码}/index.csv`、`raw/index.json`、`raw/主文档` | 想保存 SEC 主文档时 |
+
+核心区别：
+
+- `vr hk/us/cn` 是最终结果命令，目标是生成可以直接打开的研究表 CSV。
+- `vr financials` 是底层数据缓存命令，目标是把结构化财报数据按股票保存到本地。
+- `vr filings` 是原始文件命令，目标是保存公告索引和主文档。
+- `vr filings` 支持 `--workers`；默认值是 `1`，大批量时可小幅提速。
+
+依赖关系：
+
+- `vr hk/us/cn` 不强制依赖 `financials`。
+- 如果本地已有 `financials` 缓存，`vr hk/us/cn` 会优先读取缓存。
+- 如果本地没有缓存，`vr hk/us/cn` 会按原逻辑联网补充数据。
+- `filings` 和 `financials` 互不依赖；一个保存原始公告/申报文件，一个保存结构化财务数据。
+
+## 推荐工作流
+
+第一次初始化：
+
+```bash
+uv sync
+uv run vr financials --market cn --workers 3
+uv run vr financials --market hk --workers 3
+uv run vr financials --market us --workers 3
+uv run vr cn
+uv run vr hk
+uv run vr us
+```
+
+说明：
+
+- `financials` 第一次会很慢，因为要逐只股票缓存历史财报。
+- 如果中途断了，下次不要从头检查，直接用 `--missing-only` 续跑。
+- 研究表命令 `vr cn/hk/us` 会优先使用已经缓存好的财报数据。
+
+日常更新研究表：
+
+```bash
+uv run vr cn
+uv run vr hk
+uv run vr us
+```
+
+说明：
+
+- 日常只需要这三个命令。
+- 行情会重新抓取。
+- 财务增强字段优先走本地缓存。
+- 输出 CSV 后，在 Excel 里筛选。
+
+每周或阶段性补齐底层财报缓存：
+
+```bash
+uv run vr financials --market cn --missing-only --workers 3
+uv run vr financials --market hk --missing-only --workers 3
+uv run vr financials --market us --missing-only --workers 3
+```
+
+说明：
+
+- `--missing-only` 只补缺失的财报文件；已经完整缓存的股票会跳过。
+- 适合上一次全量任务没跑完，或者本地缺了某几张 statement 文件。
+- 它不会为了检查新报告期而重跑已经完整缓存的股票。
+
+财报季更新：
+
+```bash
+uv run vr financials --market cn --workers 3
+uv run vr financials --market hk --workers 3
+uv run vr financials --market us --workers 3
+uv run vr cn --refresh-enrich
+uv run vr hk --refresh-enrich
+uv run vr us --refresh-enrich
+```
+
+说明：
+
+- 财报发布后，不要用 `--missing-only`，否则已经完整缓存的股票会被跳过。
+- 普通 `financials` 会重新检查各股票是否有新报告期，并只追加本地没有的新报告期。
+- `--refresh-enrich` 会强制刷新研究表里的增强字段。
+
+下载 A 股年报 PDF：
+
+```bash
+uv run vr filings --market cn --download
+```
+
+下载 A 股半年报、一季报、三季报和年报 PDF：
+
+```bash
+uv run vr filings --market cn --category all --download
+```
+
+中断后继续下载或补索引：
+
+```bash
+uv run vr financials --market cn --missing-only --workers 3
+uv run vr filings --market cn --download
+```
+
+说明：
+
+- `financials --missing-only` 用于结构化财报缓存续跑，只补缺失的财报文件。
+- `filings --download` 会跳过已经存在的文件，只下载缺失文件。
+
+## 常见问题
+
+为什么 `financials` 全量任务很慢？
+
+`financials` 会逐只股票请求上游接口，A 股、港股、美股加起来数量很多。项目默认还会限速，避免请求过快被上游临时限制。第一次全量缓存慢是正常的。
+
+什么时候用 `--missing-only`？
+
+当全量任务中断、机器休眠、网络断开，或者你只想补缺失的财报文件时使用：
+
+```bash
+uv run vr financials --market cn --missing-only
+```
+
+什么时候不要用 `--missing-only`？
+
+财报刚发布、你想检查已缓存股票有没有新报告期时，不要用 `--missing-only`。它会跳过已经完整缓存的股票。财报季应该跑普通命令：
+
+```bash
+uv run vr financials --market cn
+```
+
+如果需要强制重新抓取并追加一份版本，用：
+
+```bash
+uv run vr financials --market cn --refresh
+```
+
+财报更新后我该跑哪个命令？
+
+先更新底层财报缓存，再刷新研究表增强字段：
+
+```bash
+uv run vr financials --market cn --workers 3
+uv run vr cn --refresh-enrich
+```
+
+港股和美股同理，把 `cn` 换成 `hk` 或 `us`。
+
+上游接口失败是不是 bug？
+
+不一定。AKShare 底层数据来自不同网站，网络波动、限流、单只股票缺数据都会导致失败。建议先降低并发，例如 `--workers 1` 或 `--workers 2`，再用 `--missing-only` 补跑失败或未完成的股票。
+
+原始文件下载失败怎么办？
+
+`filings --download` 会把失败原因写到 `下载状态`。老公告可能上游文件已失效，例如返回 404。再次运行同一命令会跳过已存在文件，并继续尝试缺失文件：
+
+```bash
+uv run vr filings --market cn --download
+```
+
+`financials` 和 `filings` 有什么关系？
+
+二者互不依赖。`financials` 保存结构化财务数据，给研究表补字段；`filings` 保存公告索引和原始文件，保留原始数据。日常只看 Excel 研究表时，跑 `vr hk/us/cn` 即可。
 
 ## 港股
 
@@ -205,7 +415,7 @@ uv run vr financials --market cn --limit 5
 uv run vr financials --refresh
 ```
 
-断点式补跑，只抓本地还没有缓存文件的股票：
+断点式补跑，只补缺失的财报文件：
 
 ```bash
 uv run vr financials --market cn --missing-only
@@ -213,7 +423,7 @@ uv run vr financials --market hk --missing-only
 uv run vr financials --market us --missing-only
 ```
 
-`--missing-only` 适合全量任务中断后继续跑；如果你想检查新财报是否发布，不要用这个参数，直接跑普通 `financials` 或使用 `--refresh`。
+`--missing-only` 适合全量任务中断后继续跑；它会跳过已经完整缓存的股票，只补缺失的 statement 文件。如果你想检查新财报是否发布，不要用这个参数，直接跑普通 `financials` 或使用 `--refresh`。
 
 默认会控制请求频率：
 
@@ -240,14 +450,15 @@ uv run vr financials --sleep-seconds 2 --batch-size 10 --batch-sleep-seconds 8
 更新逻辑：
 
 - 默认只追加本地没有的新报告期。
-- 不删除旧报告期。
-- `--refresh` 会把重新抓到的数据追加进去，用 `抓取时间` 区分版本。
+- 自动只保留最近 5 年的数据，旧报告期会被清理。
+- `--refresh` 会重新抓取并覆盖同一报告期的最新版本。
 
-## 财报公告和 PDF
+## 财报公告和原始文件
 
-`financials` 缓存结构化财务数据；`filings` 缓存原始公告索引和 PDF 文件。
+`financials` 缓存结构化财务数据；`filings` 缓存原始公告索引和原始文件。
 
-目前 `filings` 先支持 A 股年报。
+目前 `filings` 支持 A 股、港股和美股申报文件。
+`filings` 现在也支持 `--workers`，默认是 `1`，建议先从小并发开始。
 
 缓存单只股票年报公告索引：
 
@@ -255,10 +466,16 @@ uv run vr financials --sleep-seconds 2 --batch-size 10 --batch-sleep-seconds 8
 uv run vr filings --market cn --symbol 000001
 ```
 
-下载单只股票年报 PDF：
+缓存单只股票半年报公告索引：
 
 ```bash
-uv run vr filings --market cn --symbol 000001 --download
+uv run vr filings --market cn --symbol 000001 --category 半年报
+```
+
+下载单只股票全部定期报告 PDF：
+
+```bash
+uv run vr filings --market cn --symbol 000001 --category all --download
 ```
 
 缓存全量 A 股年报公告索引：
@@ -271,6 +488,42 @@ uv run vr filings --market cn
 
 ```bash
 uv run vr filings --market cn --download
+```
+
+全量下载 A 股全部定期报告 PDF：
+
+```bash
+uv run vr filings --market cn --category all --download
+```
+
+缓存单只港股年报公告索引：
+
+```bash
+uv run vr filings --market hk --symbol 00700
+```
+
+下载单只港股全部定期报告 PDF：
+
+```bash
+uv run vr filings --market hk --symbol 00700 --category all --download
+```
+
+缓存单只美股年报主文档：
+
+```bash
+uv run vr filings --market us --symbol AAPL --download
+```
+
+缓存美股全部常见申报类型：
+
+```bash
+uv run vr filings --market us --category all --download
+```
+
+全量下载港股年报 PDF：
+
+```bash
+uv run vr filings --market hk --download
 ```
 
 先试跑 3 只：
@@ -289,13 +542,18 @@ uv run vr filings --market cn --refresh --download
 
 - `data/raw/filings/cn/000001/index.csv`
 - `data/raw/filings/cn/000001/pdfs/*.pdf`
+- `data/raw/filings/hk/00700/index.csv`
+- `data/raw/filings/hk/00700/pdfs/*.pdf`
+- `data/raw/filings/us/AAPL/index.csv`
+- `data/raw/filings/us/AAPL/raw/*`
 
 更新逻辑：
 
 - 默认按公告链接增量追加。
-- 不删除旧公告。
-- `--download` 会下载缺失的 PDF，并更新 `下载状态`。
-- `--refresh` 会重新抓取并追加一份新记录。
+- `index.csv` 会保存 `公告分类`，可在 Excel 里按 `年报`、`半年报`、`一季报`、`三季报` 筛选。
+- 自动只保留最近 5 年的公告，旧公告和对应原始文件会被清理。
+- `--download` 会下载缺失的原始文件，并更新 `下载状态`。
+- `--refresh` 会重新抓取并覆盖同一公告链接的最新版本。
 
 ## 字段
 
