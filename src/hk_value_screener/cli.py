@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import pandas as pd
@@ -47,6 +48,34 @@ def _market_label(market: str) -> str:
 
 def _preview_columns_for_market(market: str) -> list[str]:
     return ["代码", "名称", "最新价", "成交额", MARKET_PE_COLUMNS[market], "市净率", "总市值"]
+
+
+def _financial_history_candidates(frame: pd.DataFrame, market: str) -> pd.DataFrame:
+    output = frame.copy()
+    if market != "us":
+        return output
+
+    for column in ["最新价", "总市值"]:
+        if column in output.columns:
+            output[column] = pd.to_numeric(output[column], errors="coerce")
+            output = output[output[column].notna()]
+
+    if "名称" in output.columns:
+        names = output["名称"].fillna("").astype(str)
+        non_company_pattern = (
+            "ETF|ETN|Fund|Index|Treasury|Bond|Physical Gold|"
+            " Wt$| Warrant| Rt$| Right| Unit| Acquisition|"
+            " Series | Pfd| Preferred"
+        )
+        output = output[~names.str.contains(non_company_pattern, case=False, regex=True)]
+
+    if "代码" in output.columns:
+        codes = output["代码"].fillna("").astype(str)
+        output = output[
+            ~codes.str.contains(r"(?:_|-|/|\^|\.P|(?:W|WS|WT|R|U)$)", case=False, regex=True)
+        ]
+
+    return output
 
 
 @app.command("bootstrap")
@@ -443,12 +472,45 @@ def financials(
     sleep_seconds: float = 1.5,
     batch_size: int = 10,
     batch_sleep_seconds: float = 5.0,
+    workers: int = 1,
 ) -> None:
     """Cache raw financial histories locally."""
-    if market not in {"hk", "us", "cn"}:
-        console.print("`financials` supports only `hk`, `us`, or `cn`.")
+    if market not in {"hk", "us", "cn", "all"}:
+        console.print("`financials` supports only `hk`, `us`, `cn`, or `all`.")
+        raise typer.Exit(code=1)
+    if workers < 1:
+        console.print("`--workers` must be >= 1.")
+        raise typer.Exit(code=1)
+    if market == "all" and config_file is not None:
+        console.print(
+            "`financials --market all` uses default configs and does not accept --config-file."
+        )
         raise typer.Exit(code=1)
 
+    markets = ["hk", "us", "cn"] if market == "all" else [market]
+    for selected_market in markets:
+        _run_financials_for_market(
+            selected_market,
+            config_file=config_file,
+            limit=limit,
+            refresh=refresh,
+            sleep_seconds=sleep_seconds,
+            batch_size=batch_size,
+            batch_sleep_seconds=batch_sleep_seconds,
+            workers=workers,
+        )
+
+
+def _run_financials_for_market(
+    market: str,
+    config_file: Path | None,
+    limit: int | None,
+    refresh: bool,
+    sleep_seconds: float,
+    batch_size: int,
+    batch_sleep_seconds: float,
+    workers: int,
+) -> None:
     ensure_directories()
     if config_file is None:
         config_file = {
@@ -469,6 +531,9 @@ def financials(
 
     frame = pd.read_csv(source_csv, dtype={"代码": str})
     frame["代码"] = normalize_security_codes(frame["代码"], market=market)
+    raw_count = len(frame)
+    frame = _financial_history_candidates(frame, market)
+    candidate_count = len(frame)
     codes = sorted(frame["代码"].dropna().drop_duplicates().tolist())
     if limit is not None:
         codes = codes[:limit]
@@ -482,6 +547,16 @@ def financials(
     added_rows_by_statement: dict[str, int] = {}
     failed_count = 0
 
+    def record_result(result: object) -> None:
+        nonlocal failed_count
+        for statement, added_rows in result.added_rows_by_statement.items():
+            added_rows_by_statement[statement] = (
+                added_rows_by_statement.get(statement, 0) + added_rows
+            )
+        if result.status != "成功":
+            failed_count += 1
+            console.print(f"{result.code}: {result.status}")
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -491,23 +566,40 @@ def financials(
         console=console,
     ) as progress:
         task_id = progress.add_task(f"缓存{_market_label(market)}历史财报", total=len(codes))
-        for index, code in enumerate(codes, start=1):
-            result = cache_fetcher(code, root_dir=root_dir, refresh=refresh)
-            for statement, added_rows in result.added_rows_by_statement.items():
-                added_rows_by_statement[statement] = (
-                    added_rows_by_statement.get(statement, 0) + added_rows
-                )
-            if result.status != "成功":
-                failed_count += 1
-                console.print(f"{result.code}: {result.status}")
+        if workers == 1:
+            for index, code in enumerate(codes, start=1):
+                result = cache_fetcher(code, root_dir=root_dir, refresh=refresh)
+                record_result(result)
+                progress.advance(task_id)
+                if index < len(codes) and sleep_seconds > 0:
+                    time.sleep(sleep_seconds)
+                if batch_size > 0 and index % batch_size == 0 and index < len(codes):
+                    time.sleep(batch_sleep_seconds)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                pending = set()
+                for index, code in enumerate(codes, start=1):
+                    while len(pending) >= workers:
+                        done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            record_result(future.result())
+                            progress.advance(task_id)
 
-            progress.advance(task_id)
-            if index < len(codes) and sleep_seconds > 0:
-                time.sleep(sleep_seconds)
-            if batch_size > 0 and index % batch_size == 0 and index < len(codes):
-                time.sleep(batch_sleep_seconds)
+                    pending.add(executor.submit(cache_fetcher, code, root_dir, refresh))
+                    if index < len(codes) and sleep_seconds > 0:
+                        time.sleep(sleep_seconds)
+                    if batch_size > 0 and index % batch_size == 0 and index < len(codes):
+                        time.sleep(batch_sleep_seconds)
+
+                while pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        record_result(future.result())
+                        progress.advance(task_id)
 
     console.print(f"Cached financial histories for {len(codes)} {_market_label(market)} companies.")
+    if candidate_count < raw_count:
+        console.print(f"Skipped {raw_count - candidate_count} non-company or unsupported symbols.")
     for statement, added_rows in sorted(added_rows_by_statement.items()):
         console.print(f"Added {statement} rows: {added_rows}.")
     console.print(f"Failed companies: {failed_count}.")

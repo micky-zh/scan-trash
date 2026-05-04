@@ -1405,6 +1405,8 @@ def _save_financial_history_statement(
     report_column: str,
     refresh: bool,
 ) -> int:
+    if fetched_frame is None:
+        return 0
     existing = _read_csv_if_present(existing_path)
     fetched = _add_financial_cache_metadata(fetched_frame, code, market, fetched_at)
     merged, added_rows = merge_financial_history_cache(
@@ -1592,22 +1594,23 @@ def cache_us_financial_history(
         for statement in statements
     }
 
+    def fetch_statement(symbol: str) -> pd.DataFrame:
+        try:
+            frame = ak.stock_financial_us_report_em(
+                stock=normalized_code,
+                symbol=symbol,
+                indicator="年报",
+            )
+        except TypeError as exc:
+            if "'NoneType' object is not subscriptable" in str(exc):
+                return pd.DataFrame()
+            raise
+        return frame if frame is not None else pd.DataFrame()
+
     try:
-        balance_frame = ak.stock_financial_us_report_em(
-            stock=normalized_code,
-            symbol="资产负债表",
-            indicator="年报",
-        )
-        income_frame = ak.stock_financial_us_report_em(
-            stock=normalized_code,
-            symbol="综合损益表",
-            indicator="年报",
-        )
-        cashflow_frame = ak.stock_financial_us_report_em(
-            stock=normalized_code,
-            symbol="现金流量表",
-            indicator="年报",
-        )
+        balance_frame = fetch_statement("资产负债表")
+        income_frame = fetch_statement("综合损益表")
+        cashflow_frame = fetch_statement("现金流量表")
 
         added_rows = {
             "balance": _save_financial_history_statement(

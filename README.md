@@ -132,6 +132,23 @@ uv run vr financials --market hk
 uv run vr financials --market us
 ```
 
+美股全量行情里包含 ETF、ETN、基金、权证、Right、Unit、SPAC 等非普通公司证券；这些标的通常没有三大报表，命令会默认跳过。
+
+三个市场一起跑：
+
+```bash
+uv run vr financials --market all
+```
+
+并发抓取：
+
+```bash
+uv run vr financials --market us --workers 3
+uv run vr financials --market all --workers 3
+```
+
+`--workers` 默认是 `1`，最稳；建议先用 `2` 到 `4`，过高容易触发上游接口限流。
+
 先试跑 5 只：
 
 ```bash
