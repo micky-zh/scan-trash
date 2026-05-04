@@ -1466,18 +1466,18 @@ def cache_cn_financial_history(
             paths["indicators"],
             indicator_frame,
             normalized_code,
+            "cn",
             fetched_at,
             report_column="日期",
-            market="cn",
             refresh=refresh,
         )
         abstract_added = _save_financial_history_statement(
             paths["abstracts"],
             abstract_frame,
             normalized_code,
+            "cn",
             fetched_at,
             report_column="报告期",
-            market="cn",
             refresh=refresh,
         )
 
