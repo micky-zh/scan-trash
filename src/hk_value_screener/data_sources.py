@@ -322,6 +322,10 @@ CN_RESEARCH_VIEW_COLUMNS = [
     "营业收入同比增长率(%)",
     "净利润同比增长率(%)",
     "EPS同比增长率(%)",
+    "过去3年营业总收入CAGR(%)",
+    "过去5年营业总收入CAGR(%)",
+    "过去3年净利润CAGR(%)",
+    "过去5年净利润CAGR(%)",
     "经营现金流净额",
     "资本开支",
     "自由现金流",
@@ -346,6 +350,9 @@ CN_RESEARCH_VIEW_COLUMNS = [
     "存货周转率",
     "存货周转天数",
     "总资产周转率",
+    "过去5年净利润为正年数",
+    "过去5年经营现金流为正年数",
+    "过去5年经营现金流/净利润",
     "报告期",
     "财务指标日期",
     "补充数据状态",
@@ -651,6 +658,47 @@ def _annual_metric_map(
         value = _to_number(_find_amount(subset, patterns))
         if value is not None:
             metric_map[report_date] = value
+    return metric_map
+
+
+def _annual_column_map(
+    frame: pd.DataFrame,
+    report_column: str,
+    value_column: str,
+) -> dict[str, float]:
+    if frame.empty or report_column not in frame.columns or value_column not in frame.columns:
+        return {}
+
+    metric_map: dict[str, float] = {}
+    report_dates = frame[report_column].astype(str)
+    for report_date in _sorted_report_dates(frame, report_column):
+        subset = frame[report_dates == report_date]
+        if subset.empty:
+            continue
+        value = _to_number(subset.iloc[-1].get(value_column))
+        if value is not None:
+            metric_map[report_date] = value
+    return metric_map
+
+
+def _annual_cn_operating_cash_flow_map(abstract: pd.DataFrame) -> dict[str, float]:
+    if abstract.empty or "报告期" not in abstract.columns:
+        return {}
+
+    metric_map: dict[str, float] = {}
+    report_periods = abstract["报告期"].astype(str)
+    for report_period in _sorted_report_dates(abstract, "报告期"):
+        subset = abstract[report_periods == report_period]
+        if subset.empty:
+            continue
+        row = subset.iloc[-1]
+        shares = _safe_divide(row.get("净利润"), row.get("基本每股收益"))
+        cash_flow_per_share = _to_number(
+            _first_present(row.get("每股经营现金流"), row.get("每股经营性现金流(元)"))
+        )
+        if shares is None or cash_flow_per_share is None:
+            continue
+        metric_map[report_period] = shares * cash_flow_per_share
     return metric_map
 
 
@@ -1452,6 +1500,26 @@ def _latest_and_previous_rows_by_column(
     return latest, previous
 
 
+def _fetch_cn_derived_history_metrics(abstract: pd.DataFrame) -> dict[str, object]:
+    revenue_map = _annual_column_map(abstract, "报告期", "营业总收入")
+    profit_map = _annual_column_map(abstract, "报告期", "净利润")
+    operating_cash_flow_map = _annual_cn_operating_cash_flow_map(abstract)
+
+    return {
+        "过去3年营业总收入CAGR(%)": _annual_cagr(revenue_map, 3),
+        "过去5年营业总收入CAGR(%)": _annual_cagr(revenue_map, 5),
+        "过去3年净利润CAGR(%)": _annual_cagr(profit_map, 3),
+        "过去5年净利润CAGR(%)": _annual_cagr(profit_map, 5),
+        "过去5年净利润为正年数": _positive_year_count(profit_map, 5),
+        "过去5年经营现金流为正年数": _positive_year_count(operating_cash_flow_map, 5),
+        "过去5年经营现金流/净利润": _ratio_from_annual_maps(
+            operating_cash_flow_map,
+            profit_map,
+            5,
+        ),
+    }
+
+
 def fetch_cn_enriched_metrics(symbol: str, timeout_seconds: int = 20) -> dict[str, object]:
     """
     Fetch a richer China A-share profile using AKShare financial endpoints.
@@ -1469,6 +1537,7 @@ def fetch_cn_enriched_metrics(symbol: str, timeout_seconds: int = 20) -> dict[st
                     symbol=normalized_symbol,
                     indicator="按年度",
                 )
+            result.update(_fetch_cn_derived_history_metrics(abstract))
             abstract_row, previous_abstract_row = _latest_and_previous_rows_by_column(
                 abstract,
                 "报告期",

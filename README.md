@@ -14,6 +14,7 @@
 
 - [变更记录](docs/CHANGELOG.md)
 - [待办事项](docs/TODO.md)
+- [投资研究框架](investment-research/framework/README.md)
 
 ## 安装
 
@@ -119,7 +120,7 @@ uv run vr filings --market us --symbol AAPL --download
 - `vr financials` 是底层数据缓存命令，目标是把结构化财报数据按股票保存到本地。
 - `vr filings` 是原始文件命令，目标是保存公告索引和主文档。
 - `vr filings` 支持 `--workers`；默认值是 `1`，大批量时可小幅提速。
-- 港股和美股研究表会优先用本地 `financials` 缓存计算 3/5 年 CAGR 和 5 年稳定性指标；历史不够时会留空。
+- A 股、港股和美股研究表会优先用本地 `financials` 缓存计算 3/5 年 CAGR 和 5 年稳定性指标；历史不够时会留空。
 
 依赖关系：
 
@@ -235,6 +236,53 @@ uv run vr filings --market hk --symbol 00700 --download
 - 最后按需看 `filings`，用原始公告和主文档核对管理层表述、风险事项和一次性因素。
 - 这三步不是硬依赖，但组合起来最适合做个股深度分析。
 
+### 使用 investment-analysis skill
+
+本仓库保留了一个可持续迭代的投资分析 skill 主版本：
+
+- `investment-research-skill/`
+
+本地 Codex 安装副本建议放在：
+
+- `~/.codex/skills/investment-analysis/`
+
+如果本地还没有安装，可以用非删除式复制同步：
+
+```bash
+mkdir -p ~/.codex/skills/investment-analysis/agents
+mkdir -p ~/.codex/skills/investment-analysis/references
+cp investment-research-skill/SKILL.md ~/.codex/skills/investment-analysis/SKILL.md
+cp investment-research-skill/agents/openai.yaml ~/.codex/skills/investment-analysis/agents/openai.yaml
+cp investment-research-skill/references/*.md ~/.codex/skills/investment-analysis/references/
+```
+
+使用前推荐先准备本地数据。以港股腾讯为例：
+
+```bash
+uv run vr financials --market hk --symbol 00700
+uv run vr hk --symbol 00700
+uv run vr filings --market hk --symbol 00700 --download
+```
+
+然后在 Codex 里发起分析：
+
+```text
+用 investment-analysis 分析 00700 腾讯控股，基于本地 financials 和 filings 数据，生成一份带日期的初始深度分析报告。
+```
+
+报告输出建议放在：
+
+```text
+investment-research/reports/00700-腾讯控股/YYYY-MM-DD-init-深度分析.md
+```
+
+注意：
+
+- skill 本身不负责自动下载数据；它负责执行分析框架、生成报告、记录假设和后续跟踪。
+- `financials` 提供结构化财务数据，适合算长期指标和财务比率。
+- `filings` 提供原始公告和主文档，适合核对年报文字、附注、风险事项和管理层表述。
+- 财报季要用普通 `financials` 检查新报告期，不要用 `--missing-only`。
+
 ## 黑名单
 
 如果某家公司已经判断为能力圈外，或者业务、口径、风险特征暂时不想继续跟踪，可以手工加入黑名单。
@@ -305,6 +353,10 @@ uv run vr filings --market cn --download
 `financials` 和 `filings` 有什么关系？
 
 二者互不依赖。`financials` 保存结构化财务数据，给研究表补字段；`filings` 保存公告索引和原始文件，保留原始数据。日常只看 Excel 研究表时，跑 `vr hk/us/cn` 即可。
+
+为什么有些港股产品会被跳过，或者 `补充数据状态` 失败？
+
+为了避免把明显不是普通经营公司的证券拉进财务分析流程，`vr hk` 和 `vr financials --market hk` 会默认跳过一批非经营主体，例如 ETF、杠杆/反向产品、权证、债券型产品和类似结构性证券。像 `南方两倍做多MSTR-U` 这类产品，本身就不适合按普通公司财报口径去算长期指标。
 
 ## 港股
 
@@ -751,7 +803,7 @@ A 股研究表重点字段：
 
 说明：
 
-- 港股和美股的长期指标依赖本地历史财报缓存；历史不够时会留空。
+- A 股、港股和美股的长期指标依赖本地历史财报缓存；历史不够时会留空。
 
 ## 缓存逻辑
 

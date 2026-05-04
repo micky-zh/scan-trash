@@ -1,0 +1,8 @@
+interface:
+  display_name: "Investment Analysis"
+  short_description: "Structured stock research and review workflow"
+  brand_color: "#0F766E"
+  default_prompt: "Use $investment-analysis to produce a dated, evidence-backed stock research report with risks and follow-up indicators."
+policy:
+  allow_implicit_invocation: true
+

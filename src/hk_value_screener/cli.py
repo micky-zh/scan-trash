@@ -88,9 +88,23 @@ def _normalize_us_filing_category(category: str) -> str:
     return normalized
 
 
+def _non_company_name_pattern(market: str) -> str:
+    shared = (
+        "ETF|ETN|Fund|Index|Treasury|Bond|Physical Gold|"
+        " Wt$| Warrant| Rt$| Right| Unit| Acquisition|"
+        " Series | Pfd| Preferred"
+    )
+    if market == "hk":
+        return (
+            shared
+            + "|REIT|Trust|杠杆|反向|两倍|三倍|牛证|熊证|认股证|结构性|票据|做多|做空"
+        )
+    return shared
+
+
 def _financial_history_candidates(frame: pd.DataFrame, market: str) -> pd.DataFrame:
     output = frame.copy()
-    if market != "us":
+    if market not in {"hk", "us"}:
         return output
 
     for column in ["最新价", "总市值"]:
@@ -100,12 +114,9 @@ def _financial_history_candidates(frame: pd.DataFrame, market: str) -> pd.DataFr
 
     if "名称" in output.columns:
         names = output["名称"].fillna("").astype(str)
-        non_company_pattern = (
-            "ETF|ETN|Fund|Index|Treasury|Bond|Physical Gold|"
-            " Wt$| Warrant| Rt$| Right| Unit| Acquisition|"
-            " Series | Pfd| Preferred"
-        )
-        output = output[~names.str.contains(non_company_pattern, case=False, regex=True)]
+        output = output[
+            ~names.str.contains(_non_company_name_pattern(market), case=False, regex=True)
+        ]
 
     if "代码" in output.columns:
         codes = output["代码"].fillna("").astype(str)
@@ -223,6 +234,8 @@ def _load_hk_research_base(config_file: Path, symbol: str | None = None) -> pd.D
 
     frame = pd.read_csv(source_csv, dtype={"代码": str})
     frame["代码"] = normalize_security_codes(frame["代码"], market="hk")
+    if symbol is None:
+        frame = _financial_history_candidates(frame, market="hk")
     return _filter_frame_by_symbol(frame, market="hk", symbol=symbol) if symbol else frame
 
 

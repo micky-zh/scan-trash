@@ -11,6 +11,7 @@ from hk_value_screener.data_sources import (
     HK_SPOT_FULL_COLUMN_ORDER,
     US_SPOT_FULL_COLUMN_ORDER,
     _fetch_hk_derived_report_metrics,
+    _fetch_cn_derived_history_metrics,
     _fetch_us_derived_report_metrics,
     _fill_missing_filing_categories,
     _parse_hkex_title_search,
@@ -401,6 +402,38 @@ def test_fetch_us_derived_report_metrics_computes_long_term_fields(monkeypatch) 
     assert metrics["过去5年经营现金流为正年数"] == 5
     assert metrics["过去5年经营现金流/净利润"] == pytest.approx(6.0)
     assert metrics["过去5年自由现金流为正年数"] == 5
+
+
+def test_fetch_cn_derived_history_metrics_computes_long_term_fields() -> None:
+    abstract = pd.DataFrame(
+        [
+            {
+                "报告期": str(year),
+                "营业总收入": revenue,
+                "净利润": profit,
+                "基本每股收益": 2.0,
+                "每股经营现金流": 12.0,
+            }
+            for year, revenue, profit in [
+                (2019, 100.0, 20.0),
+                (2020, 125.0, 25.0),
+                (2021, 156.25, 31.25),
+                (2022, 195.3125, 39.0625),
+                (2023, 244.140625, 48.828125),
+                (2024, 305.17578125, 61.03515625),
+            ]
+        ]
+    )
+
+    metrics = _fetch_cn_derived_history_metrics(abstract)
+
+    assert metrics["过去3年营业总收入CAGR(%)"] == pytest.approx(25.0)
+    assert metrics["过去5年营业总收入CAGR(%)"] == pytest.approx(25.0)
+    assert metrics["过去3年净利润CAGR(%)"] == pytest.approx(25.0)
+    assert metrics["过去5年净利润CAGR(%)"] == pytest.approx(25.0)
+    assert metrics["过去5年净利润为正年数"] == 5
+    assert metrics["过去5年经营现金流为正年数"] == 5
+    assert metrics["过去5年经营现金流/净利润"] == pytest.approx(6.0)
 
 
 def test_build_us_research_view_merges_financial_ratio_fields() -> None:

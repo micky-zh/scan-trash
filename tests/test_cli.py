@@ -58,6 +58,29 @@ def test_us_financial_history_candidates_skip_non_company_symbols() -> None:
     assert candidates["代码"].tolist() == ["AAPL"]
 
 
+def test_hk_financial_history_candidates_skip_non_company_symbols() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "代码": "9799",
+                "名称": "南方两倍做多MSTR-U",
+                "最新价": 1.314,
+                "总市值": 2737.0,
+            },
+            {
+                "代码": "00700",
+                "名称": "腾讯控股",
+                "最新价": 380.0,
+                "总市值": 3600000000000,
+            },
+        ]
+    )
+
+    candidates = _financial_history_candidates(frame, market="hk")
+
+    assert candidates["代码"].tolist() == ["00700"]
+
+
 def test_financial_history_cache_complete_requires_all_market_files(tmp_path) -> None:
     (tmp_path / "indicators").mkdir()
     (tmp_path / "abstracts").mkdir()
