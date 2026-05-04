@@ -205,6 +205,10 @@ HK_RESEARCH_VIEW_COLUMNS = [
     "营业收入同比增长率(%)",
     "净利润同比增长率(%)",
     "EPS同比增长率(%)",
+    "过去3年营业总收入CAGR(%)",
+    "过去5年营业总收入CAGR(%)",
+    "过去3年净利润CAGR(%)",
+    "过去5年净利润CAGR(%)",
     "经营现金流净额",
     "资本开支",
     "自由现金流",
@@ -255,6 +259,10 @@ US_RESEARCH_VIEW_COLUMNS = [
     "营业收入同比增长率(%)",
     "净利润同比增长率(%)",
     "EPS同比增长率(%)",
+    "过去3年营业收入CAGR(%)",
+    "过去5年营业收入CAGR(%)",
+    "过去3年归母净利润CAGR(%)",
+    "过去5年归母净利润CAGR(%)",
     "经营现金流净额",
     "资本开支",
     "自由现金流",
@@ -270,6 +278,10 @@ US_RESEARCH_VIEW_COLUMNS = [
     "权益比率(%)",
     "有息负债率(%)",
     "净债务/EBITDA",
+    "过去5年归母净利润为正年数",
+    "过去5年经营现金流为正年数",
+    "过去5年经营现金流/净利润",
+    "过去5年自由现金流为正年数",
     "应收账款周转率",
     "存货周转率",
     "总资产周转率",
@@ -595,6 +607,107 @@ def _latest_and_previous_report_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame,
         else pd.DataFrame()
     )
     return latest, previous
+
+
+def _sorted_report_dates(frame: pd.DataFrame, report_column: str) -> list[str]:
+    if frame.empty or report_column not in frame.columns:
+        return []
+
+    raw_dates = frame[report_column].dropna().astype(str).drop_duplicates().tolist()
+    if not raw_dates:
+        return []
+
+    parsed_dates = {date: pd.to_datetime(date, errors="coerce") for date in raw_dates}
+    if any(pd.notna(value) for value in parsed_dates.values()):
+        return sorted(
+            raw_dates,
+            key=lambda date: (
+                pd.isna(parsed_dates[date]),
+                parsed_dates[date] if pd.notna(parsed_dates[date]) else date,
+                date,
+            ),
+        )
+    return sorted(raw_dates)
+
+
+def _annual_metric_map(
+    frame: pd.DataFrame,
+    report_column: str,
+    patterns: list[str],
+) -> dict[str, float]:
+    if frame.empty or report_column not in frame.columns:
+        return {}
+
+    metric_map: dict[str, float] = {}
+    report_dates = frame[report_column].astype(str)
+    for report_date in _sorted_report_dates(frame, report_column):
+        subset = frame[report_dates == report_date]
+        value = _to_number(_find_amount(subset, patterns))
+        if value is not None:
+            metric_map[report_date] = value
+    return metric_map
+
+
+def _annual_free_cash_flow_map(
+    frame: pd.DataFrame,
+    report_column: str,
+    operating_patterns: list[str],
+    capex_pattern_groups: list[list[str]],
+) -> dict[str, float]:
+    if frame.empty or report_column not in frame.columns:
+        return {}
+
+    metric_map: dict[str, float] = {}
+    report_dates = frame[report_column].astype(str)
+    for report_date in _sorted_report_dates(frame, report_column):
+        subset = frame[report_dates == report_date]
+        operating_cash_flow = _to_number(_find_amount(subset, operating_patterns))
+        capex_items = [
+            _absolute_number(_find_amount(subset, patterns))
+            for patterns in capex_pattern_groups
+        ]
+        capital_expenditure = _sum_if_any(capex_items)
+        if operating_cash_flow is None or capital_expenditure is None:
+            continue
+        metric_map[report_date] = operating_cash_flow - capital_expenditure
+    return metric_map
+
+
+def _annual_cagr(metric_map: dict[str, float], years: int) -> float | None:
+    values = list(metric_map.values())
+    if len(values) < years + 1:
+        return None
+    first = values[-(years + 1)]
+    last = values[-1]
+    if first <= 0 or last <= 0:
+        return None
+    return ((last / first) ** (1 / years) - 1) * 100
+
+
+def _positive_year_count(metric_map: dict[str, float], years: int = 5) -> int | None:
+    values = list(metric_map.values())
+    if len(values) < years:
+        return None
+    return sum(value > 0 for value in values[-years:])
+
+
+def _ratio_from_annual_maps(
+    numerator_map: dict[str, float],
+    denominator_map: dict[str, float],
+    years: int = 5,
+) -> float | None:
+    common_dates = [
+        report_date
+        for report_date in numerator_map
+        if report_date in denominator_map
+    ]
+    if len(common_dates) < years:
+        return None
+
+    selected_dates = common_dates[-years:]
+    numerator = sum(numerator_map[report_date] for report_date in selected_dates)
+    denominator = sum(denominator_map[report_date] for report_date in selected_dates)
+    return _safe_divide(numerator, denominator)
 
 
 def build_hk_research_view(
@@ -980,6 +1093,20 @@ def _fetch_hk_derived_report_metrics(symbol: str) -> dict[str, object]:
         else (shareholder_profit or 0) + (depreciation_amortization or 0)
     )
 
+    revenue_map = _annual_metric_map(income_statement, "REPORT_DATE", ["营业额", "营运收入"])
+    profit_map = _annual_metric_map(income_statement, "REPORT_DATE", ["股东应占溢利"])
+    operating_cash_flow_map = _annual_metric_map(
+        cash_flow,
+        "REPORT_DATE",
+        ["经营业务现金净额", "经营产生现金", "经营活动现金净额"],
+    )
+    free_cash_flow_map = _annual_free_cash_flow_map(
+        cash_flow,
+        "REPORT_DATE",
+        ["经营业务现金净额", "经营产生现金", "经营活动现金净额"],
+        [["购建固定资产"], ["购建无形资产及其他资产"]],
+    )
+
     return {
         "营业总收入": revenue,
         "流动资产合计": current_assets,
@@ -993,6 +1120,10 @@ def _fetch_hk_derived_report_metrics(symbol: str) -> dict[str, object]:
         "自由现金流": free_cash_flow,
         "FCF/净利润": _safe_divide(free_cash_flow, shareholder_profit),
         "每股自由现金流": _safe_divide(free_cash_flow, shares),
+        "过去3年营业总收入CAGR(%)": _annual_cagr(revenue_map, 3),
+        "过去5年营业总收入CAGR(%)": _annual_cagr(revenue_map, 5),
+        "过去3年净利润CAGR(%)": _annual_cagr(profit_map, 3),
+        "过去5年净利润CAGR(%)": _annual_cagr(profit_map, 5),
         "营业收入同比增长率(%)": _percentage_growth(revenue, previous_revenue),
         "净利润同比增长率(%)": _percentage_growth(
             shareholder_profit,
@@ -1015,6 +1146,14 @@ def _fetch_hk_derived_report_metrics(symbol: str) -> dict[str, object]:
         "总资产周转率": _safe_divide(revenue, total_assets),
         "速动比率": quick_ratio,
         "现金比率": cash_ratio,
+        "过去5年净利润为正年数": _positive_year_count(profit_map, 5),
+        "过去5年经营现金流为正年数": _positive_year_count(operating_cash_flow_map, 5),
+        "过去5年经营现金流/净利润": _ratio_from_annual_maps(
+            operating_cash_flow_map,
+            profit_map,
+            5,
+        ),
+        "过去5年自由现金流为正年数": _positive_year_count(free_cash_flow_map, 5),
     }
 
 
@@ -1042,6 +1181,10 @@ def fetch_hk_enriched_metrics(symbol: str, timeout_seconds: int = 20) -> dict[st
             )
             shares = _safe_divide(result.get("净利润"), result.get("基本每股收益(元)"))
             result["每股自由现金流"] = _safe_divide(result.get("自由现金流"), shares)
+            if result.get("净债务/EBITDA") is not None and result.get("净负债/EBITDA") is None:
+                result["净负债/EBITDA"] = result.get("净债务/EBITDA")
+            if result.get("利息支付倍数") is not None and result.get("利息保障倍数") is None:
+                result["利息保障倍数"] = result.get("利息支付倍数")
     except Exception as exc:  # pragma: no cover - network failure path
         result["补充数据状态"] = f"失败: {str(exc)[:120]}"
 
@@ -1162,12 +1305,34 @@ def _fetch_us_derived_report_metrics(symbol: str, basic_eps: object) -> dict[str
         else (net_profit or 0) + (depreciation_amortization or 0)
     )
 
+    revenue_map = _annual_metric_map(income_statement, "REPORT_DATE", ["营业收入", "主营收入"])
+    profit_map = _annual_metric_map(
+        income_statement,
+        "REPORT_DATE",
+        ["归属于普通股股东净利润", "归属于母公司股东净利润", "净利润"],
+    )
+    operating_cash_flow_map = _annual_metric_map(
+        cash_flow,
+        "REPORT_DATE",
+        ["经营活动产生的现金流量净额"],
+    )
+    free_cash_flow_map = _annual_free_cash_flow_map(
+        cash_flow,
+        "REPORT_DATE",
+        ["经营活动产生的现金流量净额"],
+        [["购买固定资产"]],
+    )
+
     return {
         "经营现金流净额": operating_cash_flow,
         "资本开支": capital_expenditure,
         "自由现金流": free_cash_flow,
         "FCF/净利润": _safe_divide(free_cash_flow, net_profit),
         "每股自由现金流": _safe_divide(free_cash_flow, shares),
+        "过去3年营业收入CAGR(%)": _annual_cagr(revenue_map, 3),
+        "过去5年营业收入CAGR(%)": _annual_cagr(revenue_map, 5),
+        "过去3年归母净利润CAGR(%)": _annual_cagr(profit_map, 3),
+        "过去5年归母净利润CAGR(%)": _annual_cagr(profit_map, 5),
         "营业收入同比增长率(%)": _percentage_growth(revenue, previous_revenue),
         "净利润同比增长率(%)": _percentage_growth(net_profit, previous_net_profit),
         "有息负债率(%)": (
@@ -1184,6 +1349,14 @@ def _fetch_us_derived_report_metrics(symbol: str, basic_eps: object) -> dict[str
         "应收账款周转率": _safe_divide(revenue, receivables),
         "存货周转率": _safe_divide(revenue, inventory),
         "总资产周转率": _safe_divide(revenue, total_assets),
+        "过去5年归母净利润为正年数": _positive_year_count(profit_map, 5),
+        "过去5年经营现金流为正年数": _positive_year_count(operating_cash_flow_map, 5),
+        "过去5年经营现金流/净利润": _ratio_from_annual_maps(
+            operating_cash_flow_map,
+            profit_map,
+            5,
+        ),
+        "过去5年自由现金流为正年数": _positive_year_count(free_cash_flow_map, 5),
     }
 
 

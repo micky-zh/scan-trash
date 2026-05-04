@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from hk_value_screener.data_sources import (
     CN_FILING_CATEGORIES,
@@ -9,10 +10,13 @@ from hk_value_screener.data_sources import (
     HK_FILING_CATEGORIES,
     HK_SPOT_FULL_COLUMN_ORDER,
     US_SPOT_FULL_COLUMN_ORDER,
+    _fetch_hk_derived_report_metrics,
+    _fetch_us_derived_report_metrics,
     _fill_missing_filing_categories,
     _parse_hkex_title_search,
     build_cn_research_view,
     build_hk_research_view,
+    fetch_hk_enriched_metrics,
     build_us_research_view,
     cninfo_pdf_url,
     filing_index_cache_path,
@@ -204,6 +208,187 @@ def test_build_hk_research_view_merges_enriched_fields() -> None:
         "市净率",
         "股东权益回报率(%)",
     ]
+
+
+def test_fetch_hk_enriched_metrics_fills_alias_columns(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "hk_value_screener.data_sources._fetch_hk_financial_indicator_snapshot",
+        lambda symbol: {},
+    )
+    monkeypatch.setattr(
+        "hk_value_screener.data_sources._fetch_hk_analysis_indicator_snapshot",
+        lambda symbol: {},
+    )
+    monkeypatch.setattr(
+        "hk_value_screener.data_sources._fetch_hk_dividend_snapshot",
+        lambda symbol: {},
+    )
+    monkeypatch.setattr(
+        "hk_value_screener.data_sources._fetch_hk_company_profile_snapshot",
+        lambda symbol: {},
+    )
+    monkeypatch.setattr(
+        "hk_value_screener.data_sources._fetch_hk_security_profile_snapshot",
+        lambda symbol: {},
+    )
+    monkeypatch.setattr(
+        "hk_value_screener.data_sources._fetch_hk_derived_report_metrics",
+        lambda symbol: {
+            "净债务/EBITDA": 1.2,
+            "利息支付倍数": 8.8,
+        },
+    )
+
+    metrics = fetch_hk_enriched_metrics("00700", timeout_seconds=0)
+
+    assert metrics["净债务/EBITDA"] == 1.2
+    assert metrics["净负债/EBITDA"] == 1.2
+    assert metrics["利息支付倍数"] == 8.8
+    assert metrics["利息保障倍数"] == 8.8
+
+
+def test_fetch_hk_derived_report_metrics_computes_long_term_fields(monkeypatch) -> None:
+    def make_frame(kind: str) -> pd.DataFrame:
+        rows = [{"REPORT_DATE": "2024-12-31"}]
+        if kind == "income":
+            for year, revenue, profit in [
+                (2019, 100.0, 20.0),
+                (2020, 125.0, 25.0),
+                (2021, 156.25, 31.25),
+                (2022, 195.3125, 39.0625),
+                (2023, 244.140625, 48.828125),
+                (2024, 305.17578125, 61.03515625),
+            ]:
+                report_date = f"{year}-12-31"
+                rows.extend(
+                    [
+                        {"REPORT_DATE": report_date, "ITEM_NAME": "营业额", "AMOUNT": revenue},
+                        {"REPORT_DATE": report_date, "ITEM_NAME": "股东应占溢利", "AMOUNT": profit},
+                    ]
+                )
+        elif kind == "cashflow":
+            for year, ocf in [
+                (2019, 120.0),
+                (2020, 150.0),
+                (2021, 187.5),
+                (2022, 234.375),
+                (2023, 292.96875),
+                (2024, 366.2109375),
+            ]:
+                report_date = f"{year}-12-31"
+                rows.extend(
+                    [
+                        {
+                            "REPORT_DATE": report_date,
+                            "ITEM_NAME": "经营业务现金净额",
+                            "AMOUNT": ocf,
+                        },
+                        {
+                            "REPORT_DATE": report_date,
+                            "ITEM_NAME": "购建固定资产",
+                            "AMOUNT": 20.0,
+                        },
+                    ]
+                )
+        return pd.DataFrame(rows)
+
+    def fake_read_cache(market: str, code: str, statement: str) -> pd.DataFrame:
+        if market != "hk":
+            return pd.DataFrame()
+        if statement == "balance":
+            return pd.DataFrame([{"REPORT_DATE": "2024-12-31"}])
+        if statement == "income":
+            return make_frame("income")
+        if statement == "cashflow":
+            return make_frame("cashflow")
+        return pd.DataFrame()
+
+    monkeypatch.setattr("hk_value_screener.data_sources._read_financial_history_cache", fake_read_cache)
+
+    metrics = _fetch_hk_derived_report_metrics("00700")
+
+    assert metrics["过去3年营业总收入CAGR(%)"] == pytest.approx(25.0)
+    assert metrics["过去5年营业总收入CAGR(%)"] == pytest.approx(25.0)
+    assert metrics["过去3年净利润CAGR(%)"] == pytest.approx(25.0)
+    assert metrics["过去5年净利润CAGR(%)"] == pytest.approx(25.0)
+    assert metrics["过去5年净利润为正年数"] == 5
+    assert metrics["过去5年经营现金流为正年数"] == 5
+    assert metrics["过去5年经营现金流/净利润"] == pytest.approx(6.0)
+    assert metrics["过去5年自由现金流为正年数"] == 5
+
+
+def test_fetch_us_derived_report_metrics_computes_long_term_fields(monkeypatch) -> None:
+    def make_frame(kind: str) -> pd.DataFrame:
+        rows = [{"REPORT_DATE": "2024-12-31"}]
+        if kind == "income":
+            for year, revenue, profit in [
+                (2019, 100.0, 20.0),
+                (2020, 125.0, 25.0),
+                (2021, 156.25, 31.25),
+                (2022, 195.3125, 39.0625),
+                (2023, 244.140625, 48.828125),
+                (2024, 305.17578125, 61.03515625),
+            ]:
+                report_date = f"{year}-12-31"
+                rows.extend(
+                    [
+                        {"REPORT_DATE": report_date, "ITEM_NAME": "营业收入", "AMOUNT": revenue},
+                        {
+                            "REPORT_DATE": report_date,
+                            "ITEM_NAME": "归属于普通股股东净利润",
+                            "AMOUNT": profit,
+                        },
+                    ]
+                )
+        elif kind == "cashflow":
+            for year, ocf in [
+                (2019, 120.0),
+                (2020, 150.0),
+                (2021, 187.5),
+                (2022, 234.375),
+                (2023, 292.96875),
+                (2024, 366.2109375),
+            ]:
+                report_date = f"{year}-12-31"
+                rows.extend(
+                    [
+                        {
+                            "REPORT_DATE": report_date,
+                            "ITEM_NAME": "经营活动产生的现金流量净额",
+                            "AMOUNT": ocf,
+                        },
+                        {
+                            "REPORT_DATE": report_date,
+                            "ITEM_NAME": "购买固定资产",
+                            "AMOUNT": 20.0,
+                        },
+                    ]
+                )
+        return pd.DataFrame(rows)
+
+    def fake_read_cache(market: str, code: str, statement: str) -> pd.DataFrame:
+        if market != "us":
+            return pd.DataFrame()
+        if statement == "balance":
+            return pd.DataFrame([{"REPORT_DATE": "2024-12-31"}])
+        if statement == "income":
+            return make_frame("income")
+        if statement == "cashflow":
+            return make_frame("cashflow")
+        return pd.DataFrame()
+
+    monkeypatch.setattr("hk_value_screener.data_sources._read_financial_history_cache", fake_read_cache)
+
+    metrics = _fetch_us_derived_report_metrics("AAPL", 1.0)
+
+    assert metrics["过去3年营业收入CAGR(%)"] == pytest.approx(25.0)
+    assert metrics["过去5年营业收入CAGR(%)"] == pytest.approx(25.0)
+    assert metrics["过去3年归母净利润CAGR(%)"] == pytest.approx(25.0)
+    assert metrics["过去5年归母净利润CAGR(%)"] == pytest.approx(25.0)
+    assert metrics["过去5年归母净利润为正年数"] == 5
+    assert metrics["过去5年经营现金流为正年数"] == 5
+    assert metrics["过去5年经营现金流/净利润"] == pytest.approx(6.0)
+    assert metrics["过去5年自由现金流为正年数"] == 5
 
 
 def test_build_us_research_view_merges_financial_ratio_fields() -> None:
