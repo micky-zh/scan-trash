@@ -1,6 +1,6 @@
 import pandas as pd
 
-from hk_value_screener.cli import _financial_history_candidates
+from hk_value_screener.cli import _financial_history_cache_complete, _financial_history_candidates
 
 
 def test_us_financial_history_candidates_skip_non_company_symbols() -> None:
@@ -49,3 +49,15 @@ def test_us_financial_history_candidates_skip_non_company_symbols() -> None:
     candidates = _financial_history_candidates(frame, market="us")
 
     assert candidates["代码"].tolist() == ["AAPL"]
+
+
+def test_financial_history_cache_complete_requires_all_market_files(tmp_path) -> None:
+    (tmp_path / "indicators").mkdir()
+    (tmp_path / "abstracts").mkdir()
+    (tmp_path / "indicators" / "000001.csv").write_text("代码\n000001\n")
+
+    assert not _financial_history_cache_complete("cn", "000001", tmp_path)
+
+    (tmp_path / "abstracts" / "000001.csv").write_text("代码\n000001\n")
+
+    assert _financial_history_cache_complete("cn", "000001", tmp_path)

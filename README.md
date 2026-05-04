@@ -22,6 +22,46 @@ uv sync
 uv run vr --help
 ```
 
+## 命令怎么用
+
+日常只想导出 Excel 研究表，跑下面三个命令之一：
+
+```bash
+uv run vr hk
+uv run vr us
+uv run vr cn
+```
+
+这三个命令会生成最终研究表：
+
+- `uv run vr hk`：导出港股研究表。
+- `uv run vr us`：导出美股研究表。
+- `uv run vr cn`：导出 A 股研究表。
+
+想先把底层历史财报缓存到本地，跑 `financials`：
+
+```bash
+uv run vr financials --market hk
+uv run vr financials --market us
+uv run vr financials --market cn
+```
+
+如果上一次没跑完，想断点式补跑，使用 `--missing-only`：
+
+```bash
+uv run vr financials --market cn --missing-only
+```
+
+`hk/us/cn` 研究表命令不强制依赖 `financials`。如果本地已有 `financials` 缓存，会优先使用本地缓存补充部分财报字段；如果没有缓存，会按原逻辑联网抓取。
+
+想下载原始年报公告和 PDF，跑 `filings`：
+
+```bash
+uv run vr filings --market cn --download
+```
+
+目前 `filings` 先支持 A 股年报。
+
 ## 港股
 
 日常运行：
@@ -114,6 +154,10 @@ A 股会生成并使用：
 
 ## 财报本地缓存
 
+`financials` 用来缓存底层历史财报，不直接生成最终研究表。
+
+缓存后的数据会被 `uv run vr hk/us/cn` 优先读取；没有缓存时，研究表命令仍会联网补充数据。
+
 缓存 A 股历史财务指标和财务摘要：
 
 ```bash
@@ -161,6 +205,16 @@ uv run vr financials --market cn --limit 5
 uv run vr financials --refresh
 ```
 
+断点式补跑，只抓本地还没有缓存文件的股票：
+
+```bash
+uv run vr financials --market cn --missing-only
+uv run vr financials --market hk --missing-only
+uv run vr financials --market us --missing-only
+```
+
+`--missing-only` 适合全量任务中断后继续跑；如果你想检查新财报是否发布，不要用这个参数，直接跑普通 `financials` 或使用 `--refresh`。
+
 默认会控制请求频率：
 
 - 每只股票后暂停 `1.5` 秒
@@ -188,6 +242,60 @@ uv run vr financials --sleep-seconds 2 --batch-size 10 --batch-sleep-seconds 8
 - 默认只追加本地没有的新报告期。
 - 不删除旧报告期。
 - `--refresh` 会把重新抓到的数据追加进去，用 `抓取时间` 区分版本。
+
+## 财报公告和 PDF
+
+`financials` 缓存结构化财务数据；`filings` 缓存原始公告索引和 PDF 文件。
+
+目前 `filings` 先支持 A 股年报。
+
+缓存单只股票年报公告索引：
+
+```bash
+uv run vr filings --market cn --symbol 000001
+```
+
+下载单只股票年报 PDF：
+
+```bash
+uv run vr filings --market cn --symbol 000001 --download
+```
+
+缓存全量 A 股年报公告索引：
+
+```bash
+uv run vr filings --market cn
+```
+
+全量下载 A 股年报 PDF：
+
+```bash
+uv run vr filings --market cn --download
+```
+
+先试跑 3 只：
+
+```bash
+uv run vr filings --market cn --limit 3 --download
+```
+
+强制刷新：
+
+```bash
+uv run vr filings --market cn --refresh --download
+```
+
+输出文件：
+
+- `data/raw/filings/cn/000001/index.csv`
+- `data/raw/filings/cn/000001/pdfs/*.pdf`
+
+更新逻辑：
+
+- 默认按公告链接增量追加。
+- 不删除旧公告。
+- `--download` 会下载缺失的 PDF，并更新 `下载状态`。
+- `--refresh` 会重新抓取并追加一份新记录。
 
 ## 字段
 
@@ -338,4 +446,4 @@ A 股研究表重点字段：
 - `configs/us.yaml`
 - `configs/cn.yaml`
 
-`vr hk`、`vr us` 和 `vr cn` 不依赖内置筛选规则，也不依赖本地财务 CSV。
+`vr hk`、`vr us` 和 `vr cn` 不依赖内置筛选规则；如果本地已有 `financials` 缓存，会优先使用缓存补充字段，没有缓存时再联网抓取。

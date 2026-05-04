@@ -19,12 +19,14 @@ from hk_value_screener.data_sources import (
     build_cn_research_view,
     build_hk_research_view,
     build_us_research_view,
+    cache_cn_annual_filings,
     cache_cn_financial_history,
     cache_hk_financial_history,
     cache_us_financial_history,
     fetch_cn_enriched_metrics,
     fetch_hk_enriched_metrics,
     fetch_us_enriched_metrics,
+    financial_history_cache_path,
     get_cn_spot_full,
     get_hk_spot_full,
     get_us_spot_full,
@@ -473,6 +475,7 @@ def financials(
     batch_size: int = 10,
     batch_sleep_seconds: float = 5.0,
     workers: int = 1,
+    missing_only: bool = False,
 ) -> None:
     """Cache raw financial histories locally."""
     if market not in {"hk", "us", "cn", "all"}:
@@ -498,6 +501,7 @@ def financials(
             batch_size=batch_size,
             batch_sleep_seconds=batch_sleep_seconds,
             workers=workers,
+            missing_only=missing_only,
         )
 
 
@@ -510,6 +514,7 @@ def _run_financials_for_market(
     batch_size: int,
     batch_sleep_seconds: float,
     workers: int,
+    missing_only: bool,
 ) -> None:
     ensure_directories()
     if config_file is None:
@@ -539,6 +544,16 @@ def _run_financials_for_market(
         codes = codes[:limit]
 
     root_dir = resolve_project_path(f"data/raw/financials/{market}")
+    skipped_cached_count = 0
+    if missing_only:
+        before_count = len(codes)
+        codes = [
+            code
+            for code in codes
+            if not _financial_history_cache_complete(market, code, root_dir)
+        ]
+        skipped_cached_count = before_count - len(codes)
+
     cache_fetcher = {
         "hk": cache_hk_financial_history,
         "us": cache_us_financial_history,
@@ -598,10 +613,104 @@ def _run_financials_for_market(
                         progress.advance(task_id)
 
     console.print(f"Cached financial histories for {len(codes)} {_market_label(market)} companies.")
+    if missing_only:
+        console.print(f"Skipped cached companies: {skipped_cached_count}.")
     if candidate_count < raw_count:
         console.print(f"Skipped {raw_count - candidate_count} non-company or unsupported symbols.")
     for statement, added_rows in sorted(added_rows_by_statement.items()):
         console.print(f"Added {statement} rows: {added_rows}.")
+    console.print(f"Failed companies: {failed_count}.")
+    console.print(f"Saved under {root_dir}")
+
+
+def _financial_history_cache_complete(market: str, code: str, root_dir: Path) -> bool:
+    statements = {
+        "cn": ["indicators", "abstracts"],
+        "hk": ["balance", "income", "cashflow"],
+        "us": ["balance", "income", "cashflow"],
+    }[market]
+    return all(
+        financial_history_cache_path(market, code, statement, root_dir).exists()
+        for statement in statements
+    )
+
+
+@app.command("filings")
+def filings(
+    market: str = "cn",
+    config_file: Path | None = None,
+    symbol: str | None = None,
+    limit: int | None = None,
+    refresh: bool = False,
+    download: bool = False,
+    sleep_seconds: float = 1.5,
+    batch_size: int = 10,
+    batch_sleep_seconds: float = 5.0,
+) -> None:
+    """Cache annual filing indexes and optional PDF files locally."""
+    if market != "cn":
+        console.print("`filings` currently supports only `cn`.")
+        raise typer.Exit(code=1)
+
+    ensure_directories()
+    if config_file is None:
+        config_file = CONFIGS_DIR / "cn.yaml"
+    config = load_app_config(config_file)
+    if config.market != "cn":
+        console.print("`filings --market cn` requires a cn config.")
+        raise typer.Exit(code=1)
+
+    if symbol:
+        codes = [normalize_security_codes(pd.Series([symbol]), market="cn").iloc[0]]
+    else:
+        source_csv = resolve_project_path(config.output.raw_csv_path)
+        if not source_csv.exists():
+            console.print(f"Missing China A-share spot CSV: {source_csv}")
+            console.print("Fetching China A-share spot data first.")
+            _fetch_spot_full(config_file)
+
+        frame = pd.read_csv(source_csv, dtype={"代码": str})
+        frame["代码"] = normalize_security_codes(frame["代码"], market="cn")
+        codes = sorted(frame["代码"].dropna().drop_duplicates().tolist())
+        if limit is not None:
+            codes = codes[:limit]
+
+    root_dir = resolve_project_path("data/raw/filings/cn")
+    added_rows = 0
+    downloaded_files = 0
+    failed_count = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("缓存A股年报公告", total=len(codes))
+        for index, code in enumerate(codes, start=1):
+            result = cache_cn_annual_filings(
+                code,
+                root_dir=root_dir,
+                refresh=refresh,
+                download=download,
+            )
+            added_rows += result.added_rows
+            downloaded_files += result.downloaded_files
+            if result.status != "成功":
+                failed_count += 1
+                console.print(f"{result.code}: {result.status}")
+
+            progress.advance(task_id)
+            if index < len(codes) and sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+            if batch_size > 0 and index % batch_size == 0 and index < len(codes):
+                time.sleep(batch_sleep_seconds)
+
+    console.print(f"Cached annual filings for {len(codes)} China A-share companies.")
+    console.print(f"Added filing rows: {added_rows}.")
+    console.print(f"Downloaded PDF files: {downloaded_files}.")
     console.print(f"Failed companies: {failed_count}.")
     console.print(f"Saved under {root_dir}")
 

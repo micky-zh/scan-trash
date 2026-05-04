@@ -7,11 +7,16 @@ from hk_value_screener.data_sources import (
     build_cn_research_view,
     build_hk_research_view,
     build_us_research_view,
+    cninfo_pdf_url,
+    filing_index_cache_path,
+    filing_pdf_cache_path,
     financial_history_cache_path,
+    merge_filing_index_cache,
     merge_financial_history_cache,
     normalize_cn_spot_full,
     normalize_hk_spot_full,
     normalize_us_spot_full,
+    parse_cninfo_disclosure_link,
 )
 
 
@@ -350,3 +355,59 @@ def test_financial_history_cache_path_normalizes_codes_by_market() -> None:
     assert str(financial_history_cache_path("us", "105.AAPL", "cashflow")).endswith(
         "data/raw/financials/us/cashflow/AAPL.csv"
     )
+
+
+def test_parse_cninfo_disclosure_link_and_builds_pdf_url() -> None:
+    link = (
+        "http://www.cninfo.com.cn/new/disclosure/detail?"
+        "stockCode=000001&announcementId=1225022887&"
+        "orgId=gssz0000001&announcementTime=2026-03-21"
+    )
+
+    parsed = parse_cninfo_disclosure_link(link)
+
+    assert parsed["announcement_id"] == "1225022887"
+    assert parsed["announcement_time"] == "2026-03-21"
+    assert cninfo_pdf_url(link) == (
+        "http://static.cninfo.com.cn/finalpage/2026-03-21/1225022887.PDF"
+    )
+
+
+def test_filing_paths_normalize_code_and_safe_filename() -> None:
+    assert str(filing_index_cache_path("cn", "1")).endswith(
+        "data/raw/filings/cn/000001/index.csv"
+    )
+    assert str(
+        filing_pdf_cache_path("cn", "1", "2026-03-21", "1225022887", "2025年年度报告/摘要")
+    ).endswith("data/raw/filings/cn/000001/pdfs/2026-03-21_1225022887_2025年年度报告_摘要.pdf")
+
+
+def test_merge_filing_index_cache_appends_only_new_links() -> None:
+    existing = pd.DataFrame(
+        [
+            {
+                "代码": "000001",
+                "公告标题": "2024年年度报告",
+                "公告链接": "https://example.com/old",
+            }
+        ]
+    )
+    fetched = pd.DataFrame(
+        [
+            {
+                "代码": "000001",
+                "公告标题": "2024年年度报告更新",
+                "公告链接": "https://example.com/old",
+            },
+            {
+                "代码": "000001",
+                "公告标题": "2025年年度报告",
+                "公告链接": "https://example.com/new",
+            },
+        ]
+    )
+
+    merged, added_count = merge_filing_index_cache(existing, fetched)
+
+    assert added_count == 1
+    assert list(merged["公告链接"]) == ["https://example.com/old", "https://example.com/new"]
