@@ -14,6 +14,13 @@
 10. Risks, disconfirming signals, sell criteria.
 11. Monitoring plan and next review date.
 
+At the valuation step, force two separate judgments:
+
+1. `Is this a good business?`
+2. `Is the current price giving enough margin of safety?`
+
+Do not merge them into one vague conclusion. A company can have a moat and still fail the price test.
+
 ## Evidence Standard
 
 Every major conclusion should follow:
@@ -34,6 +41,15 @@ Good:
 The company has maintained ROIC above X% while generating positive free cash flow for Y years. This suggests the growth is not purely accounting-driven. The conclusion weakens if receivable days rise materially or FCF turns negative during continued revenue growth.
 ```
 
+For valuation, the evidence standard must include the actual math:
+
+```text
+Base-case intrinsic value is X.
+Required margin of safety is Y% because moat is [strong/medium/weak], balance sheet is [strong/medium/weak], and key uncertainty is [A].
+Therefore acceptable buy price is X × (1 - Y%).
+Current price is above/below that level by Z%.
+```
+
 ## Report Storage
 
 Create a company folder under `investment-research/reports/`:
@@ -50,4 +66,3 @@ Use dated filenames:
 - `YYYY-MM-DD-event-事件名.md`
 
 Maintain `thesis-log.md` for original assumptions and later status.
-

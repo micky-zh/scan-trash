@@ -18,6 +18,8 @@ This skill supports disciplined individual-stock research for real investment de
 6. If reliable valuation is not possible, output `无法可靠估值` instead of forcing a precise target price.
 7. Preserve dated records. Reports, tracking notes, and decision memos must include the date.
 8. For single-stock analysis in this project, prefer local materials in this order: `financials` cache, local `filings-text` extracted text, local raw `filings`, and only then external search if material facts are still missing.
+9. Apply a defensive-investing mindset: avoiding permanent loss matters more than maximizing upside. Do not recommend aggressive sizing when downside, uncertainty, or governance risk is not well bounded.
+10. Every valuation section must show how the acceptable buy price is calculated from intrinsic value and required margin of safety. Do not say `安全边际不足` without showing the math.
 
 ## Repository Layout
 
@@ -108,6 +110,8 @@ Required:
 - Intrinsic value range.
 - Acceptable buy price.
 - Current margin of safety.
+- Required margin of safety and why that discount level is appropriate.
+- Position sizing implication: what level of conviction and downside protection would justify a starter, normal, or no position.
 - Why the estimate may be wrong.
 
 ### 5. Risk, Sell Criteria, and Review
@@ -145,6 +149,23 @@ Use this structure for full reports:
 ## 9. 跟踪指标
 ## 10. 决策记录
 ```
+
+For `## 7. 估值`, always include:
+
+- Current price / market cap.
+- Intrinsic value range.
+- Required margin of safety range.
+- `安全边际买入价 = 内在价值 × (1 - 折价率)` with the actual numbers.
+- `当前安全边际 = 1 - 当前价格 / 内在价值` or an equivalent market-cap-based expression.
+- If the company has a moat but current price is above the acceptable buy price, explicitly output `好公司，但价格未提供足够安全边际`.
+
+For `## 10. 决策记录`, if the conclusion is not `买入`, state whether the blocker is:
+
+- Business quality.
+- Governance/integrity.
+- Data confidence.
+- Price / lack of margin of safety.
+- Portfolio risk control.
 
 Allowed final decisions:
 

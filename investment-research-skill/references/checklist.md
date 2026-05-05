@@ -36,6 +36,9 @@
 - What happens if growth is zero for five years?
 - Is the upside from business compounding or multiple expansion?
 - Is the margin of safety large enough for uncertainty?
+- What discount rate or valuation haircut is justified by the actual risk, not by hope?
+- What is the explicit acceptable buy price after applying the required margin of safety?
+- If the company has a moat but the current price is too high, am I willing to wait rather than force a position?
 
 ## Behavior
 
@@ -43,4 +46,4 @@
 - What would prove me wrong?
 - Am I buying because the business is good or only because the price fell?
 - Would I still want to own it if the market closed for three years?
-
+- Am I focusing on avoiding a permanent loss first, or am I being seduced by upside scenarios?
