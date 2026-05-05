@@ -17,6 +17,7 @@ This skill supports disciplined individual-stock research for real investment de
 5. If the company is outside the user's circle of competence, say so and either stop or mark the conclusion as low confidence.
 6. If reliable valuation is not possible, output `无法可靠估值` instead of forcing a precise target price.
 7. Preserve dated records. Reports, tracking notes, and decision memos must include the date.
+8. For single-stock analysis in this project, prefer local materials in this order: `financials` cache, local `filings-text` extracted text, local raw `filings`, and only then external search if material facts are still missing.
 
 ## Repository Layout
 
@@ -29,6 +30,15 @@ investment-research/
 ├── templates/
 ├── logs/
 └── TODO.md
+```
+
+Also use local source materials when available:
+
+```text
+data/raw/financials/{market}/...
+data/raw/filings/{market}/{code}/texts/
+data/raw/filings/{market}/{code}/pdfs/
+data/raw/filings/{market}/{code}/raw/
 ```
 
 For each company, create:
@@ -83,6 +93,8 @@ Analyze in this order:
 4. Three-statement cross-checks.
 
 Use multi-year data where available. When data is missing, state exactly what is missing and how it affects confidence.
+
+For this repository, if `financials` cache is incomplete or suspicious, read local filing text extracted by `filings-text` before considering outside sources.
 
 ### 4. Valuation
 
@@ -153,4 +165,3 @@ When the user asks to improve the framework, update:
 - `investment-research/TODO.md`, if an action item remains.
 
 Do not silently change the investment process. Explain what changed and why.
-

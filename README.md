@@ -227,14 +227,16 @@ uv run vr filings --market cn --download
 uv run vr financials --market hk --symbol 00700
 uv run vr hk --symbol 00700
 uv run vr filings --market hk --symbol 00700 --download
+uv run vr filings-text --market hk --symbol 00700 --category all
 ```
 
 说明：
 
 - 先跑 `financials`，把结构化历史财报补齐，长期指标会更完整。
 - 再跑 `hk/us/cn --symbol`，看最终研究表里的可比字段。
-- 最后按需看 `filings`，用原始公告和主文档核对管理层表述、风险事项和一次性因素。
-- 这三步不是硬依赖，但组合起来最适合做个股深度分析。
+- 再跑 `filings --download`，把原始公告和主文档补齐到本地。
+- 最后跑 `filings-text`，把本地 PDF/原始文件转成纯文本，供模型直接读取。
+- 单股深度分析时，优先使用本地 `financials` 和本地 `texts`；只有本地材料不足时才考虑外部搜索。
 
 ### 使用 investment-analysis skill
 
@@ -262,12 +264,13 @@ cp investment-research-skill/references/*.md ~/.codex/skills/investment-analysis
 uv run vr financials --market hk --symbol 00700
 uv run vr hk --symbol 00700
 uv run vr filings --market hk --symbol 00700 --download
+uv run vr filings-text --market hk --symbol 00700 --category all
 ```
 
 然后在 Codex 里发起分析：
 
 ```text
-用 investment-analysis 分析 00700 腾讯控股，基于本地 financials 和 filings 数据，生成一份带日期的初始深度分析报告。
+用 investment-analysis 分析 00700 腾讯控股，优先基于本地 financials 和本地 filings-text 文本生成一份带日期的初始深度分析报告；只有本地材料不足时才补外部搜索。
 ```
 
 报告输出建议放在：
@@ -281,6 +284,7 @@ investment-research/reports/00700-腾讯控股/YYYY-MM-DD-init-深度分析.md
 - skill 本身不负责自动下载数据；它负责执行分析框架、生成报告、记录假设和后续跟踪。
 - `financials` 提供结构化财务数据，适合算长期指标和财务比率。
 - `filings` 提供原始公告和主文档，适合核对年报文字、附注、风险事项和管理层表述。
+- `filings-text` 会把本地公告 PDF/原始文件转成纯文本，适合让模型直接读取本地内容。
 - 财报季要用普通 `financials` 检查新报告期，不要用 `--missing-only`。
 
 ## 黑名单
@@ -353,6 +357,21 @@ uv run vr filings --market cn --download
 `financials` 和 `filings` 有什么关系？
 
 二者互不依赖。`financials` 保存结构化财务数据，给研究表补字段；`filings` 保存公告索引和原始文件，保留原始数据。日常只看 Excel 研究表时，跑 `vr hk/us/cn` 即可。
+
+`filings-text` 是做什么的？
+
+`filings-text` 读取已经下载到本地的公告 PDF 或原始文件，提取纯文本到 `data/raw/filings/{market}/{代码}/texts/`。这一步不联网，适合单股深度分析前给模型准备本地可读材料：
+
+```bash
+uv run vr filings-text --market hk --symbol 00700 --category all
+```
+
+个股分析时，优先顺序建议是：
+
+1. 本地 `financials`
+2. 本地 `filings-text` 文本
+3. 本地 `filings` 原始 PDF/原文
+4. 外部搜索
 
 为什么有些港股产品会被跳过，或者 `补充数据状态` 失败？
 

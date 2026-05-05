@@ -15,13 +15,16 @@ from hk_value_screener.data_sources import (
     _fetch_us_derived_report_metrics,
     _fill_missing_filing_categories,
     _parse_hkex_title_search,
+    _save_financial_history_statement,
     build_cn_research_view,
     build_hk_research_view,
     fetch_hk_enriched_metrics,
     build_us_research_view,
     cninfo_pdf_url,
+    extract_filing_text_cache,
     filing_index_cache_path,
     filing_pdf_cache_path,
+    filing_text_cache_path,
     financial_history_cache_path,
     merge_filing_index_cache,
     merge_financial_history_cache,
@@ -695,6 +698,66 @@ def test_prune_recent_financial_history_keeps_recent_rows() -> None:
     assert pruned["值"].tolist() == [2, 3]
 
 
+def test_save_financial_history_statement_keeps_multiple_items_per_report_date(tmp_path) -> None:
+    path = tmp_path / "balance.csv"
+    existing = pd.DataFrame(
+        [
+            {
+                "代码": "03613",
+                "抓取时间": "2026-05-01T00:00:00",
+                "REPORT_DATE": "2025-12-31",
+                "STD_ITEM_NAME": "总资产",
+                "AMOUNT": 100.0,
+            },
+            {
+                "代码": "03613",
+                "抓取时间": "2026-05-01T00:00:00",
+                "REPORT_DATE": "2025-12-31",
+                "STD_ITEM_NAME": "现金及等价物",
+                "AMOUNT": 30.0,
+            },
+        ]
+    )
+    existing.to_csv(path, index=False)
+
+    fetched = pd.DataFrame(
+        [
+            {
+                "REPORT_DATE": "2025-12-31",
+                "STD_ITEM_NAME": "总资产",
+                "AMOUNT": 110.0,
+            },
+            {
+                "REPORT_DATE": "2025-12-31",
+                "STD_ITEM_NAME": "现金及等价物",
+                "AMOUNT": 35.0,
+            },
+            {
+                "REPORT_DATE": "2025-12-31",
+                "STD_ITEM_NAME": "应收帐款",
+                "AMOUNT": 20.0,
+            },
+        ]
+    )
+
+    added_rows = _save_financial_history_statement(
+        path,
+        fetched,
+        code="03613",
+        market="hk",
+        fetched_at="2026-05-05T00:00:00",
+        report_column="REPORT_DATE",
+        refresh=True,
+    )
+
+    saved = pd.read_csv(path, dtype={"代码": str})
+
+    assert added_rows == 3
+    assert len(saved) == 3
+    assert set(saved["STD_ITEM_NAME"]) == {"总资产", "现金及等价物", "应收帐款"}
+    assert saved.loc[saved["STD_ITEM_NAME"] == "总资产", "AMOUNT"].iloc[0] == 110.0
+
+
 def test_prune_recent_filing_index_keeps_recent_rows() -> None:
     frame = pd.DataFrame(
         [
@@ -738,6 +801,48 @@ def test_cleanup_filing_pdf_cache_removes_orphans(tmp_path) -> None:
     assert kept_pdf.exists()
     assert not old_pdf.exists()
     assert not extra_pdf.exists()
+
+
+def test_filing_text_cache_path_uses_texts_dir() -> None:
+    path = filing_text_cache_path("hk", "3613", "20250904_annual.pdf")
+
+    assert str(path).endswith("data/raw/filings/hk/03613/texts/20250904_annual.txt")
+
+
+def test_extract_filing_text_cache_reads_local_files(tmp_path, monkeypatch) -> None:
+    root_dir = tmp_path / "data" / "raw" / "filings" / "hk"
+    code = "03613"
+    code_dir = root_dir / code
+    pdf_dir = code_dir / "pdfs"
+    pdf_dir.mkdir(parents=True)
+    local_pdf = pdf_dir / "20250904_annual.pdf"
+    local_pdf.write_bytes(b"%PDF-1.4 mock")
+
+    index = pd.DataFrame(
+        [
+            {
+                "代码": code,
+                "公告分类": "年报",
+                "公告标题": "2025 Annual Report",
+                "公告时间": "2025-09-04 17:27:00",
+                "本地文件路径": str(local_pdf),
+            }
+        ]
+    )
+    index.to_csv(code_dir / "index.csv", index=False)
+
+    monkeypatch.setattr(
+        "hk_value_screener.data_sources.extract_local_filing_text",
+        lambda path: "annual report text",
+    )
+
+    result = extract_filing_text_cache("hk", code, root_dir=root_dir, refresh=False)
+    text_path = code_dir / "texts" / "20250904_annual.txt"
+
+    assert result.status == "成功"
+    assert result.extracted_files == 1
+    assert text_path.exists()
+    assert text_path.read_text(encoding="utf-8") == "annual report text"
 
 
 def test_normalize_us_filing_ticker_keeps_class_shares() -> None:

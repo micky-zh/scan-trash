@@ -6,6 +6,29 @@
 - 每次更新都记录新增、删除、变更和时间。
 - 如果是破坏性变更，优先写清影响范围和替代用法。
 
+## v0.1.5 - 2026-05-05
+
+新增：
+
+- 新增 `vr filings-text`，支持从本地 `filings` PDF/原始文件提取文本并缓存到 `data/raw/filings/<market>/<symbol>/texts/`。
+- 项目引入 `pdfplumber`，用于本地年报/中报正文提取。
+- 新增同仁堂国药 `03613` 的首份正式研究档案，包括初始深度分析报告和 thesis log。
+- `investment-research/TODO.md` 新增两类框架待办：将霍华德·马克思的“防御性投资”原则正式纳入框架，以及梳理年报 PDF 阅读流程和工具组合。
+
+变更：
+
+- 修复港股/美股 `financials` 历史三表缓存去重逻辑：从仅按 `REPORT_DATE` 去重，改为按 `REPORT_DATE + 科目名` 去重，避免同一报告期只剩一条项目行。
+- README 和 `investment-research-skill/SKILL.md` 明确个股分析的数据优先级：本地 `financials` -> 本地 `filings-text` -> 本地 `filings` 原始文件 -> 外部搜索。
+- `filings-text` 提取时抑制底层 PDF 解析噪声，避免正常提取时输出大量无关 warning。
+
+删除：
+
+- 无。
+
+备注：
+
+- 此版本解决了 `financials --refresh` 后港股/美股本地 CSV 退化为“每年一条”的关键数据质量问题。
+
 ## v0.1.4 - 2026-05-05
 
 新增：

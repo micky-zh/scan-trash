@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "akshare>=1.17.0",
+  "pdfplumber>=0.11.6",
   "pandas>=2.2.3",
   "pydantic>=2.11.0",
   "pyyaml>=6.0.2",

@@ -34,6 +34,7 @@ from hk_value_screener.data_sources import (
     cache_hk_financial_history,
     cache_us_filings,
     cache_us_financial_history,
+    extract_filing_text_cache,
     fetch_cn_enriched_metrics,
     fetch_hk_enriched_metrics,
     fetch_us_enriched_metrics,
@@ -953,6 +954,43 @@ def filings(
     console.print(f"Downloaded files: {downloaded_files}.")
     console.print(f"Failed companies: {failed_count}.")
     console.print(f"Saved under {root_dir}")
+
+
+@app.command("filings-text")
+def filings_text(
+    market: str = "cn",
+    symbol: str = typer.Option(..., "--symbol", help="Single stock symbol to extract filing text for."),
+    category: str = typer.Option("all", "--category", help="年报/半年报/一季报/三季报/all"),
+    limit: int | None = None,
+    refresh: bool = False,
+) -> None:
+    """Extract downloaded filing files into local plain text for a single stock."""
+    if market not in {"cn", "hk", "us"}:
+        console.print("`filings-text` currently supports only `cn`, `hk`, and `us`.")
+        raise typer.Exit(code=1)
+
+    normalized_symbol = (
+        normalize_us_filing_ticker(symbol) if market == "us" else _normalize_symbol(symbol, market)
+    )
+    categories = None if category == "all" else [category]
+    root_dir = resolve_project_path(f"data/raw/filings/{market}")
+    result = extract_filing_text_cache(
+        market=market,
+        code=normalized_symbol,
+        root_dir=root_dir,
+        refresh=refresh,
+        limit=limit,
+        categories=categories,
+    )
+    if result.status.startswith("失败"):
+        console.print(f"{result.code}: {result.status}")
+        raise typer.Exit(code=1)
+
+    console.print(f"Extracted filing text for {result.code}.")
+    console.print(f"Extracted files: {result.extracted_files}.")
+    console.print(f"Skipped files: {result.skipped_files}.")
+    console.print(f"Failed files: {result.failed_files}.")
+    console.print(f"Saved under {result.output_dir}")
 
 
 @app.command("hk")

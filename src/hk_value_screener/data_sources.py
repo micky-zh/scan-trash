@@ -405,6 +405,16 @@ class FilingCacheResult:
     status: str
 
 
+@dataclass
+class FilingTextExtractionResult:
+    code: str
+    extracted_files: int
+    skipped_files: int
+    failed_files: int
+    output_dir: Path
+    status: str
+
+
 def get_hk_spot_full() -> pd.DataFrame:
     """
     Fetch full Hong Kong spot data from Eastmoney and preserve research fields.
@@ -1770,6 +1780,18 @@ def filing_pdf_cache_path(
     return root / normalized_code / "pdfs" / f"{filename}.pdf"
 
 
+def filing_text_cache_path(
+    market: str,
+    code: str,
+    source_path: str | Path,
+    root_dir: Path | None = None,
+) -> Path:
+    normalized_code = normalize_security_code(code, market=market)
+    root = root_dir or RAW_DATA_DIR / "filings" / market
+    source = Path(source_path)
+    return root / normalized_code / "texts" / f"{source.stem}.txt"
+
+
 def _build_request(url: str, user_agent: str | None = None) -> Request:
     headers = {"User-Agent": user_agent or "Mozilla/5.0"}
     return Request(url, headers=headers)
@@ -2381,6 +2403,112 @@ def _read_csv_if_present(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _normalize_extracted_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
+    normalized = unescape(normalized)
+    normalized = re.sub(r"[ \t]+\n", "\n", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
+def extract_local_filing_text(source_path: Path) -> str:
+    suffix = source_path.suffix.lower()
+    if suffix == ".pdf":
+        import pdfplumber
+
+        text_parts: list[str] = []
+        # pdfplumber/pdfminer may emit noisy parser warnings to stderr for some PDFs
+        # while still producing usable text. Keep extraction quiet for CLI usage.
+        with redirect_stderr(io.StringIO()):
+            with pdfplumber.open(source_path) as pdf:
+                for page in pdf.pages:
+                    text_parts.append(page.extract_text() or "")
+        return _normalize_extracted_text("\n".join(text_parts))
+
+    if suffix in {".txt", ".htm", ".html"}:
+        return _normalize_extracted_text(source_path.read_text(errors="ignore"))
+
+    return ""
+
+
+def extract_filing_text_cache(
+    market: str,
+    code: str,
+    root_dir: Path | None = None,
+    refresh: bool = False,
+    limit: int | None = None,
+    categories: list[str] | None = None,
+) -> FilingTextExtractionResult:
+    normalized_code = normalize_security_code(code, market=market)
+    root = root_dir or RAW_DATA_DIR / "filings" / market
+    index_path = filing_index_cache_path(market, normalized_code, root_dir)
+    output_dir = root / normalized_code / "texts"
+
+    index_frame = _read_csv_if_present(index_path)
+    if index_frame.empty or "本地文件路径" not in index_frame.columns:
+        return FilingTextExtractionResult(
+            code=normalized_code,
+            extracted_files=0,
+            skipped_files=0,
+            failed_files=0,
+            output_dir=output_dir,
+            status="失败: missing local filing index or file paths",
+        )
+
+    working = index_frame.copy()
+    if categories and "公告分类" in working.columns:
+        working = working[working["公告分类"].astype(str).isin(set(categories))].copy()
+
+    sort_columns = [
+        column
+        for column in ["公告时间", "公告日期", "filing_date", "report_date"]
+        if column in working.columns
+    ]
+    if sort_columns:
+        working["_sort_key"] = pd.NaT
+        for column in sort_columns:
+            parsed = pd.to_datetime(working[column], errors="coerce")
+            working["_sort_key"] = working["_sort_key"].combine_first(parsed)
+        working = working.sort_values("_sort_key", ascending=False, na_position="last")
+
+    if limit is not None:
+        working = working.head(limit)
+
+    extracted_files = 0
+    skipped_files = 0
+    failed_files = 0
+
+    for _, row in working.iterrows():
+        source_path = Path(str(row.get("本地文件路径", "")).strip())
+        if not source_path.exists():
+            failed_files += 1
+            continue
+
+        text_path = filing_text_cache_path(market, normalized_code, source_path.name, root_dir)
+        if text_path.exists() and text_path.stat().st_size > 0 and not refresh:
+            skipped_files += 1
+            continue
+
+        extracted = extract_local_filing_text(source_path)
+        if not extracted:
+            failed_files += 1
+            continue
+
+        text_path.parent.mkdir(parents=True, exist_ok=True)
+        text_path.write_text(extracted, encoding="utf-8")
+        extracted_files += 1
+
+    status = "成功" if failed_files == 0 else f"部分失败: {failed_files}"
+    return FilingTextExtractionResult(
+        code=normalized_code,
+        extracted_files=extracted_files,
+        skipped_files=skipped_files,
+        failed_files=failed_files,
+        output_dir=output_dir,
+        status=status,
+    )
+
+
 def _save_financial_history_statement(
     existing_path: Path,
     fetched_frame: pd.DataFrame,
@@ -2400,7 +2528,12 @@ def _save_financial_history_statement(
         report_column=report_column,
         refresh=refresh,
     )
-    merged = merged.drop_duplicates(subset=[report_column], keep="last").reset_index(drop=True)
+    dedupe_columns = [report_column]
+    for name_column in ["STD_ITEM_NAME", "ITEM_NAME"]:
+        if name_column in merged.columns:
+            dedupe_columns.append(name_column)
+            break
+    merged = merged.drop_duplicates(subset=dedupe_columns, keep="last").reset_index(drop=True)
     merged = prune_recent_financial_history(merged, report_column=report_column)
     existing_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(existing_path, index=False)

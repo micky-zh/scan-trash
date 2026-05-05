@@ -7,6 +7,7 @@ from hk_value_screener.cli import (
     _financial_history_candidates,
     _financial_history_missing_statements,
     filings,
+    filings_text,
 )
 
 
@@ -107,5 +108,12 @@ def test_financial_history_missing_statements_detects_partial_cache(tmp_path) ->
 def test_filings_rejects_invalid_workers() -> None:
     with pytest.raises(typer.Exit) as exc_info:
         filings(market="cn", workers=0)
+
+    assert exc_info.value.exit_code == 1
+
+
+def test_filings_text_rejects_invalid_market() -> None:
+    with pytest.raises(typer.Exit) as exc_info:
+        filings_text(market="all", symbol="000001")
 
     assert exc_info.value.exit_code == 1
